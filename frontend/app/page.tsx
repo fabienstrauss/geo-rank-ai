@@ -1,9 +1,35 @@
-import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
-import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from "@/components/ui/table";
+"use client";
+
+import { useEffect, useState } from "react";
+import { MessageCircle, Search, Share2, TrendingUp } from "lucide-react";
+
 import { SentimentQuadrantChart, SourcesPieChart, VisibilityChart } from "@/components/dashboard-charts";
-import { TrendingUp, Search, Share2, MessageCircle } from "lucide-react";
+import { useWorkspace } from "@/components/workspace-provider";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { DashboardData, getDashboard } from "@/lib/api";
+
+const statIcons = [TrendingUp, Search, Share2, MessageCircle];
 
 export default function Home() {
+  const { activeWorkspace } = useWorkspace();
+  const [dashboard, setDashboard] = useState<DashboardData | null>(null);
+
+  useEffect(() => {
+    async function load() {
+      if (!activeWorkspace) return;
+      const response = await getDashboard(activeWorkspace.id);
+      setDashboard(response);
+    }
+
+    void load();
+  }, [activeWorkspace]);
+
+  const hasDashboardData =
+    (dashboard?.stats?.length ?? 0) > 0 ||
+    (dashboard?.competitors?.length ?? 0) > 0 ||
+    (dashboard?.top_sources?.length ?? 0) > 0;
+
   return (
     <div className="space-y-8 pb-8">
       <div>
@@ -11,159 +37,120 @@ export default function Home() {
         <p className="text-muted-foreground mt-1">Track your brand visibility and performance across LLMs.</p>
       </div>
 
-      {/* Top Stats */}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+      {!hasDashboardData ? (
         <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
-            <CardTitle className="text-sm font-medium">Average Rank</CardTitle>
-            <TrendingUp className="w-4 h-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">2.4</div>
-            <p className="text-xs text-muted-foreground mt-1">+0.2 from last week</p>
+          <CardContent className="flex min-h-[260px] flex-col items-center justify-center text-center">
+            <TrendingUp className="mb-4 h-10 w-10 text-muted-foreground" />
+            <h2 className="text-xl font-semibold">No analytics yet</h2>
+            <p className="mt-2 max-w-lg text-sm text-muted-foreground">
+              This workspace does not have prompts, snapshots, or citation data yet. Add prompts and run evaluations to
+              populate the dashboard.
+            </p>
           </CardContent>
         </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
-            <CardTitle className="text-sm font-medium">Keywords Tracked</CardTitle>
-            <Search className="w-4 h-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">142</div>
-            <p className="text-xs text-muted-foreground mt-1">Across 12 prompt groups</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
-            <CardTitle className="text-sm font-medium">Visibility Score</CardTitle>
-            <Share2 className="w-4 h-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">68%</div>
-            <p className="text-xs text-muted-foreground mt-1">+5% from last month</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
-            <CardTitle className="text-sm font-medium">Positive Sentiment</CardTitle>
-            <MessageCircle className="w-4 h-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">84%</div>
-            <p className="text-xs text-muted-foreground mt-1">Stable</p>
-          </CardContent>
-        </Card>
-      </div>
+      ) : (
+        <>
 
-      {/* Visibility Graph & Competitor Table */}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-7">
-        <Card className="col-span-4">
-          <CardHeader>
-            <CardTitle>Visibility over Time</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <VisibilityChart />
-          </CardContent>
-        </Card>
-        <Card className="col-span-3">
-          <CardHeader>
-            <CardTitle>Competitors</CardTitle>
-          </CardHeader>
-          <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="pl-6">Brand</TableHead>
-                  <TableHead>Avg Rank</TableHead>
-                  <TableHead className="pr-6 text-right">Share</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                <TableRow>
-                  <TableCell className="pl-6 font-medium">Your Brand</TableCell>
-                  <TableCell>2.4</TableCell>
-                  <TableCell className="pr-6 text-right">32%</TableCell>
-                </TableRow>
-                <TableRow>
-                  <TableCell className="pl-6 font-medium text-muted-foreground">Competitor A</TableCell>
-                  <TableCell>3.1</TableCell>
-                  <TableCell className="pr-6 text-right">28%</TableCell>
-                </TableRow>
-                <TableRow>
-                  <TableCell className="pl-6 font-medium text-muted-foreground">Competitor B</TableCell>
-                  <TableCell>4.5</TableCell>
-                  <TableCell className="pr-6 text-right">15%</TableCell>
-                </TableRow>
-                <TableRow>
-                  <TableCell className="pl-6 font-medium text-muted-foreground">Competitor C</TableCell>
-                  <TableCell>5.2</TableCell>
-                  <TableCell className="pr-6 text-right">12%</TableCell>
-                </TableRow>
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      </div>
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+            {(dashboard?.stats ?? []).map((stat, index) => {
+              const Icon = statIcons[index];
+              return (
+                <Card key={stat.label}>
+                  <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
+                    <CardTitle className="text-sm font-medium">{stat.label}</CardTitle>
+                    <Icon className="h-4 w-4 text-muted-foreground" />
+                  </CardHeader>
+                  <CardContent>
+                    <div className="text-2xl font-bold">{stat.value}</div>
+                    <p className="mt-1 text-xs text-muted-foreground">{stat.delta ?? stat.subtitle}</p>
+                  </CardContent>
+                </Card>
+              );
+            })}
+          </div>
 
-      {/* Sentiment Graph */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Sentiment Analysis</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <SentimentQuadrantChart />
-        </CardContent>
-      </Card>
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-7">
+            <Card className="col-span-4">
+              <CardHeader>
+                <CardTitle>Visibility over Time</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <VisibilityChart data={dashboard?.visibility_chart} />
+              </CardContent>
+            </Card>
+            <Card className="col-span-3">
+              <CardHeader>
+                <CardTitle>Competitors</CardTitle>
+              </CardHeader>
+              <CardContent className="p-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="pl-6">Brand</TableHead>
+                      <TableHead>Avg Rank</TableHead>
+                      <TableHead className="pr-6 text-right">Share</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {(dashboard?.competitors ?? []).map((competitor) => (
+                      <TableRow key={competitor.brand}>
+                        <TableCell className="pl-6 font-medium">{competitor.brand}</TableCell>
+                        <TableCell>{competitor.avg_rank}</TableCell>
+                        <TableCell className="pr-6 text-right">{competitor.share}%</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+          </div>
 
-      {/* Sources Overview */}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-7">
-        <Card className="col-span-3">
-          <CardHeader>
-            <CardTitle>Source Distribution</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <SourcesPieChart />
-          </CardContent>
-        </Card>
-        <Card className="col-span-4">
-          <CardHeader>
-            <CardTitle>Top Cited Sources</CardTitle>
-          </CardHeader>
-          <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="pl-6">Source URL</TableHead>
-                  <TableHead>Type</TableHead>
-                  <TableHead className="pr-6 text-right">Citations</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                <TableRow>
-                  <TableCell className="pl-6 font-medium truncate max-w-[200px]">docs.yourbrand.com/guide</TableCell>
-                  <TableCell>Documentation</TableCell>
-                  <TableCell className="pr-6 text-right">63</TableCell>
-                </TableRow>
-                <TableRow>
-                  <TableCell className="pl-6 font-medium truncate max-w-[200px]">blog.industry-news.com/post</TableCell>
-                  <TableCell>Blog</TableCell>
-                  <TableCell className="pr-6 text-right">44</TableCell>
-                </TableRow>
-                <TableRow>
-                  <TableCell className="pl-6 font-medium truncate max-w-[200px]">reddit.com/r/seo/comments/georank</TableCell>
-                  <TableCell>Community</TableCell>
-                  <TableCell className="pr-6 text-right">33</TableCell>
-                </TableRow>
-                <TableRow>
-                  <TableCell className="pl-6 font-medium truncate max-w-[200px]">github.com/yourbrand/repo</TableCell>
-                  <TableCell>Code</TableCell>
-                  <TableCell className="pr-6 text-right">18</TableCell>
-                </TableRow>
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      </div>
+          <Card>
+            <CardHeader>
+              <CardTitle>Sentiment Analysis</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <SentimentQuadrantChart points={dashboard?.sentiment_points} />
+            </CardContent>
+          </Card>
+
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-7">
+            <Card className="col-span-3">
+              <CardHeader>
+                <CardTitle>Source Distribution</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <SourcesPieChart slices={dashboard?.source_slices} />
+              </CardContent>
+            </Card>
+            <Card className="col-span-4">
+              <CardHeader>
+                <CardTitle>Top Cited Sources</CardTitle>
+              </CardHeader>
+              <CardContent className="p-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="pl-6">Source URL</TableHead>
+                      <TableHead>Type</TableHead>
+                      <TableHead className="pr-6 text-right">Citations</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {(dashboard?.top_sources ?? []).map((source) => (
+                      <TableRow key={source.url}>
+                        <TableCell className="max-w-[200px] truncate pl-6 font-medium">{source.url}</TableCell>
+                        <TableCell>{source.source_type}</TableCell>
+                        <TableCell className="pr-6 text-right">{source.citations}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+          </div>
+        </>
+      )}
     </div>
   );
 }
