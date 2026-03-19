@@ -67,6 +67,21 @@ const ranges: { value: TimeRange; label: string }[] = [
   { value: "6m", label: "6M" },
 ];
 
+type VisibilityChartProps = {
+  data?: {
+    labels: string[];
+    series: { label: string; values: number[] }[];
+  };
+};
+
+type SentimentQuadrantChartProps = {
+  points?: { label: string; x: number; y: number }[];
+};
+
+type SourcesPieChartProps = {
+  slices?: { label: string; value: number }[];
+};
+
 function polarToCartesian(cx: number, cy: number, radius: number, angle: number) {
   return {
     x: cx + radius * Math.cos(angle),
@@ -97,16 +112,17 @@ function describeArc(
   ].join(" ");
 }
 
-export function VisibilityChart() {
+export function VisibilityChart({ data }: VisibilityChartProps) {
   const [range, setRange] = useState<TimeRange>("90d");
-  const [visibleKeys, setVisibleKeys] = useState<VisibilityKey[]>([
-    "yourBrand",
-    "competitorA",
-    "competitorB",
-    "competitorC",
-  ]);
+  const fallbackSeries = Object.values(visibilitySeries);
+  const computedSeries = (data?.series?.length ? data.series : fallbackSeries).map((series, index) => ({
+    label: series.label,
+    color: `var(--color-chart-${(index % 5) + 1})`,
+    values: series.values,
+  }));
+  const [visibleLabels, setVisibleLabels] = useState<string[]>(computedSeries.map((series) => series.label));
 
-  const labels = visibilityLabels[range];
+  const labels = data?.labels?.length ? data.labels : visibilityLabels[range];
   const width = 720;
   const height = 280;
   const padding = { top: 16, right: 16, bottom: 30, left: 40 };
@@ -115,8 +131,9 @@ export function VisibilityChart() {
   const yTicks = [20, 40, 60, 80];
 
   const linePaths = useMemo(() => {
-    return visibleKeys.map((key) => {
-      const series = visibilitySeries[key];
+    return computedSeries
+      .filter((series) => visibleLabels.includes(series.label))
+      .map((series) => {
       const stepX = chartWidth / (series.values.length - 1);
       const path = series.values
         .map((value, index) => {
@@ -128,14 +145,14 @@ export function VisibilityChart() {
 
       return { ...series, path };
     });
-  }, [chartHeight, chartWidth, padding.left, padding.top, visibleKeys]);
+  }, [chartHeight, chartWidth, computedSeries, padding.left, padding.top, visibleLabels]);
 
-  const toggleSeries = (key: VisibilityKey) => {
-    setVisibleKeys((current) => {
-      if (current.includes(key)) {
-        return current.length === 1 ? current : current.filter((item) => item !== key);
+  const toggleSeries = (label: string) => {
+    setVisibleLabels((current) => {
+      if (current.includes(label)) {
+        return current.length === 1 ? current : current.filter((item) => item !== label);
       }
-      return [...current, key];
+      return [...current, label];
     });
   };
 
@@ -200,7 +217,7 @@ export function VisibilityChart() {
             const x = padding.left + (index * chartWidth) / (labels.length - 1);
             return (
               <text
-                key={label}
+                key={`${label}-${index}`}
                 x={x}
                 y={height - 6}
                 textAnchor={index === 0 ? "start" : index === labels.length - 1 ? "end" : "middle"}
@@ -211,8 +228,8 @@ export function VisibilityChart() {
             );
           })}
 
-          {linePaths.map((series) => (
-            <g key={series.label}>
+          {linePaths.map((series, seriesIndex) => (
+            <g key={`${series.label}-${seriesIndex}`}>
               <path d={series.path} fill="none" stroke={series.color} strokeWidth="3" strokeLinecap="round" />
               {series.values.map((value, index) => {
                 const x = padding.left + (index * chartWidth) / (series.values.length - 1);
@@ -226,15 +243,14 @@ export function VisibilityChart() {
       </div>
 
       <div className="flex flex-wrap gap-2">
-        {(Object.keys(visibilitySeries) as VisibilityKey[]).map((key) => {
-          const series = visibilitySeries[key];
-          const active = visibleKeys.includes(key);
+        {computedSeries.map((series, seriesIndex) => {
+          const active = visibleLabels.includes(series.label);
 
           return (
             <button
-              key={key}
+              key={`${series.label}-${seriesIndex}`}
               type="button"
-              onClick={() => toggleSeries(key)}
+              onClick={() => toggleSeries(series.label)}
               className={cn(
                 "inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm transition-colors",
                 active ? "border-foreground/15 bg-background" : "border-border bg-muted/40 text-muted-foreground"
@@ -250,7 +266,7 @@ export function VisibilityChart() {
   );
 }
 
-export function SentimentQuadrantChart() {
+export function SentimentQuadrantChart({ points }: SentimentQuadrantChartProps) {
   const width = 720;
   const height = 300;
   const padding = { top: 20, right: 20, bottom: 36, left: 42 };
@@ -258,6 +274,10 @@ export function SentimentQuadrantChart() {
   const chartHeight = height - padding.top - padding.bottom;
   const midpointX = padding.left + chartWidth / 2;
   const midpointY = padding.top + chartHeight / 2;
+  const chartPoints = (points?.length ? points : sentimentPoints).map((point, index) => ({
+    ...point,
+    color: `var(--color-chart-${(index % 5) + 1})`,
+  }));
 
   return (
     <div className="space-y-4">
@@ -335,12 +355,12 @@ export function SentimentQuadrantChart() {
             );
           })}
 
-          {sentimentPoints.map((point) => {
+          {chartPoints.map((point, index) => {
             const x = padding.left + (point.x / 100) * chartWidth;
             const y = padding.top + chartHeight - (point.y / 100) * chartHeight;
 
             return (
-              <g key={point.label}>
+              <g key={`${point.label}-${index}`}>
                 <circle cx={x} cy={y} r="10" fill={point.color} fillOpacity="0.16" />
                 <circle cx={x} cy={y} r="5" fill={point.color} />
                 <text x={x + 10} y={y - 10} className="fill-foreground text-[12px] font-medium">
@@ -355,9 +375,13 @@ export function SentimentQuadrantChart() {
   );
 }
 
-export function SourcesPieChart() {
-  const total = sourceSlices.reduce((sum, slice) => sum + slice.value, 0);
-  const slices = sourceSlices.reduce<SourceSliceWithPath[]>((accumulator, slice, index) => {
+export function SourcesPieChart({ slices: inputSlices }: SourcesPieChartProps) {
+  const rawSlices = (inputSlices?.length ? inputSlices : sourceSlices).map((slice, index) => ({
+    ...slice,
+    color: `var(--color-chart-${(index % 5) + 1})`,
+  }));
+  const total = rawSlices.reduce((sum, slice) => sum + slice.value, 0);
+  const slices = rawSlices.reduce<SourceSliceWithPath[]>((accumulator, slice, index) => {
     const startAngle =
       index === 0
         ? -Math.PI / 2
@@ -372,8 +396,14 @@ export function SourcesPieChart() {
     <div className="grid gap-4 md:grid-cols-[220px_1fr] md:items-center">
       <div className="mx-auto flex w-full max-w-[220px] justify-center rounded-xl border bg-muted/20 p-4">
         <svg viewBox="0 0 200 200" className="h-[200px] w-[200px]">
-          {slices.map((slice) => (
-            <path key={slice.label} d={slice.path} fill={slice.color} stroke="var(--color-background)" strokeWidth="2" />
+          {slices.map((slice, index) => (
+            <path
+              key={`${slice.label}-${index}`}
+              d={slice.path}
+              fill={slice.color}
+              stroke="var(--color-background)"
+              strokeWidth="2"
+            />
           ))}
           <circle cx="100" cy="100" r="32" fill="var(--color-background)" />
           <text x="100" y="94" textAnchor="middle" className="fill-muted-foreground text-[10px] uppercase tracking-[0.24em]">
@@ -386,8 +416,8 @@ export function SourcesPieChart() {
       </div>
 
       <div className="space-y-3">
-        {sourceSlices.map((slice) => (
-          <div key={slice.label} className="flex items-center justify-between rounded-lg border px-3 py-2">
+        {rawSlices.map((slice, index) => (
+          <div key={`${slice.label}-${index}`} className="flex items-center justify-between rounded-lg border px-3 py-2">
             <div className="flex items-center gap-3">
               <span className="h-3 w-3 rounded-full" style={{ backgroundColor: slice.color }} />
               <div>
@@ -396,8 +426,8 @@ export function SourcesPieChart() {
               </div>
             </div>
             <div className="text-right">
-              <p className="text-sm font-semibold">{slice.value}%</p>
-              <p className="text-xs text-muted-foreground">{Math.round((slice.value / 100) * 184)} mentions</p>
+              <p className="text-sm font-semibold">{total > 0 ? Math.round((slice.value / total) * 100) : 0}%</p>
+              <p className="text-xs text-muted-foreground">{slice.value} mentions</p>
             </div>
           </div>
         ))}

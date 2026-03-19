@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { useWorkspace } from "@/components/workspace-provider";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   DropdownMenu,
@@ -27,238 +28,92 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { ConnectorIncident, QueueJob, Run, RunDetail, Worker, getConnectorIncidents, getQueueJobs, getRunDetail, getRunsFiltered, getWorkers } from "@/lib/api";
 import { cn } from "@/lib/utils";
-
-type RunStatus = "Completed" | "Running" | "Queued" | "Failed";
-type RunType = "Full Eval" | "Prompt Only" | "Re-Ingest" | "Backfill";
-
-type RunRecord = {
-  id: string;
-  type: RunType;
-  workspace: string;
-  scope: string;
-  models: string[];
-  status: RunStatus;
-  started: string;
-  duration: string;
-  prompts: number;
-  mentions: number;
-  visibilityDelta: string;
-  summary: string;
-  steps: { label: string; status: "done" | "active" | "pending" | "error" }[];
-  perModel: { model: string; status: string; prompts: number }[];
-  logs: string[];
-};
-
-const runs: RunRecord[] = [
-  {
-    id: "run_7x2k9l1",
-    type: "Full Eval",
-    workspace: "GeoRank AI",
-    scope: "All prompt categories",
-    models: ["GPT-5", "Claude", "Gemini"],
-    status: "Completed",
-    started: "17 Mar, 09:10",
-    duration: "12m 42s",
-    prompts: 28,
-    mentions: 412,
-    visibilityDelta: "+6.2%",
-    summary: "Strong documentation citation growth after the latest content push.",
-    steps: [
-      { label: "Queued", status: "done" },
-      { label: "Fetching sources", status: "done" },
-      { label: "Running prompts", status: "done" },
-      { label: "Scoring", status: "done" },
-      { label: "Completed", status: "done" },
-    ],
-    perModel: [
-      { model: "GPT-5", status: "Completed", prompts: 28 },
-      { model: "Claude", status: "Completed", prompts: 28 },
-      { model: "Gemini", status: "Completed", prompts: 28 },
-    ],
-    logs: [
-      "09:10 Sources refreshed from docs, blog, and reddit connectors.",
-      "09:15 Prompt category 'Sales' finished with +8.4% visibility gain.",
-      "09:22 Final scoring complete. 412 mentions attributed across 184 citations.",
-    ],
-  },
-  {
-    id: "run_4m5p8z3",
-    type: "Prompt Only",
-    workspace: "GeoRank AI",
-    scope: "Sales + Brand",
-    models: ["GPT-5", "Claude"],
-    status: "Running",
-    started: "17 Mar, 10:01",
-    duration: "8m 11s",
-    prompts: 12,
-    mentions: 146,
-    visibilityDelta: "Pending",
-    summary: "Live run focused on commercial prompts after prompt copy updates.",
-    steps: [
-      { label: "Queued", status: "done" },
-      { label: "Fetching sources", status: "done" },
-      { label: "Running prompts", status: "active" },
-      { label: "Scoring", status: "pending" },
-      { label: "Completed", status: "pending" },
-    ],
-    perModel: [
-      { model: "GPT-5", status: "Running", prompts: 12 },
-      { model: "Claude", status: "Queued", prompts: 12 },
-    ],
-    logs: [
-      "10:01 Run created from manual prompt refresh.",
-      "10:05 GPT-5 completed 9/12 prompts.",
-      "10:09 Claude workers warming up.",
-    ],
-  },
-  {
-    id: "run_9c3a1v0",
-    type: "Re-Ingest",
-    workspace: "GeoRank AI",
-    scope: "Docs + GitHub sources",
-    models: ["GPT-5"],
-    status: "Queued",
-    started: "17 Mar, 10:18",
-    duration: "0m 42s",
-    prompts: 0,
-    mentions: 0,
-    visibilityDelta: "Pending",
-    summary: "Waiting for scraper capacity before a source-only refresh.",
-    steps: [
-      { label: "Queued", status: "active" },
-      { label: "Fetching sources", status: "pending" },
-      { label: "Running prompts", status: "pending" },
-      { label: "Scoring", status: "pending" },
-      { label: "Completed", status: "pending" },
-    ],
-    perModel: [{ model: "GPT-5", status: "Queued", prompts: 0 }],
-    logs: [
-      "10:18 Re-ingest requested after docs deployment.",
-      "10:19 Waiting for worker slot.",
-    ],
-  },
-  {
-    id: "run_2r6n4q7",
-    type: "Backfill",
-    workspace: "GeoRank AI",
-    scope: "Support category historical rerun",
-    models: ["Claude", "Gemini"],
-    status: "Failed",
-    started: "16 Mar, 18:44",
-    duration: "5m 03s",
-    prompts: 9,
-    mentions: 41,
-    visibilityDelta: "-1.3%",
-    summary: "Run failed during scraper hydration because one source connector timed out.",
-    steps: [
-      { label: "Queued", status: "done" },
-      { label: "Fetching sources", status: "error" },
-      { label: "Running prompts", status: "pending" },
-      { label: "Scoring", status: "pending" },
-      { label: "Completed", status: "pending" },
-    ],
-    perModel: [
-      { model: "Claude", status: "Blocked", prompts: 9 },
-      { model: "Gemini", status: "Blocked", prompts: 9 },
-    ],
-    logs: [
-      "18:44 Backfill started for Support prompts.",
-      "18:47 Reddit connector timed out after 3 retries.",
-      "18:49 Run aborted and marked failed.",
-    ],
-  },
-];
-
-const recentFailures = [
-  {
-    id: "conn_ui_browser",
-    area: "UI scraper connector",
-    issue: "Login challenge blocked automated session renewal for Anthropic web scraping mode.",
-    time: "17 Mar, 09:54",
-  },
-  {
-    id: "conn_llm_api",
-    area: "LLM API connector",
-    issue: "Rate-limit burst returned 429s for GPT-backed scraping worker pool.",
-    time: "17 Mar, 08:41",
-  },
-];
-
-const workerQueue = {
-  workersTotal: 6,
-  workersBusy: 4,
-  queuedPromptJobs: 19,
-  activeRuns: 2,
-  queuedItems: [
-    { prompt: "Sales comparison set", connector: "LLM API scraper", assigned: "Worker 02", status: "Running" },
-    { prompt: "Brand perception rerun", connector: "UI scraper", assigned: "Worker 04", status: "Running" },
-    { prompt: "Support troubleshooting prompts", connector: "LLM API scraper", assigned: "Queued", status: "Queued" },
-    { prompt: "Product marketing citations", connector: "UI scraper", assigned: "Queued", status: "Queued" },
-  ],
-};
-
-const statusOptions: (RunStatus | "All")[] = ["All", "Completed", "Running", "Queued", "Failed"];
-const typeOptions: (RunType | "All")[] = ["All", "Full Eval", "Prompt Only", "Re-Ingest", "Backfill"];
 
 const columnSeparatorClass = "border-r border-border/60";
 
-function statusClasses(status: RunStatus) {
-  if (status === "Completed") return "border-emerald-200 bg-emerald-100 text-emerald-800";
-  if (status === "Running") return "border-sky-200 bg-sky-100 text-sky-800";
-  if (status === "Queued") return "border-amber-200 bg-amber-100 text-amber-800";
+function statusClasses(status: string) {
+  if (status === "completed") return "border-emerald-200 bg-emerald-100 text-emerald-800";
+  if (status === "running") return "border-sky-200 bg-sky-100 text-sky-800";
+  if (status === "queued") return "border-amber-200 bg-amber-100 text-amber-800";
   return "border-rose-200 bg-rose-100 text-rose-800";
 }
 
-function stepClasses(status: RunRecord["steps"][number]["status"]) {
-  if (status === "done") return "bg-emerald-500";
-  if (status === "active") return "bg-sky-500";
-  if (status === "error") return "bg-rose-500";
+function stepClasses(status: string) {
+  if (status === "completed") return "bg-emerald-500";
+  if (status === "running") return "bg-sky-500";
+  if (status === "failed") return "bg-rose-500";
   return "bg-border";
 }
 
+function titleize(value: string) {
+  return value.replaceAll("_", " ").replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function formatDateTime(value?: string | null) {
+  return value ? new Date(value).toLocaleString() : "n/a";
+}
+
+function formatDuration(seconds?: number | null) {
+  if (!seconds) return "n/a";
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${minutes}m ${remainder}s`;
+}
+
 export function RunsManager() {
+  const { activeWorkspace } = useWorkspace();
   const [query, setQuery] = useState("");
-  const [selectedStatuses, setSelectedStatuses] = useState<RunStatus[]>([]);
-  const [selectedTypes, setSelectedTypes] = useState<RunType[]>([]);
+  const [selectedStatuses, setSelectedStatuses] = useState<string[]>([]);
+  const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
+  const [runs, setRuns] = useState<Run[]>([]);
+  const [workers, setWorkers] = useState<Worker[]>([]);
+  const [queueJobs, setQueueJobs] = useState<QueueJob[]>([]);
+  const [failures, setFailures] = useState<ConnectorIncident[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [selectedRun, setSelectedRun] = useState<RunDetail | null>(null);
 
-  const filteredRuns = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
+  useEffect(() => {
+    async function load() {
+      if (!activeWorkspace) return;
+      const [runRows, workerRows, queueRows, incidentRows] = await Promise.all([
+        getRunsFiltered(activeWorkspace.id, {
+          statuses: selectedStatuses,
+          runTypes: selectedTypes,
+          search: query,
+        }),
+        getWorkers(),
+        getQueueJobs(activeWorkspace.id),
+        getConnectorIncidents(activeWorkspace.id),
+      ]);
+      setRuns(runRows);
+      setWorkers(workerRows);
+      setQueueJobs(queueRows);
+      setFailures(incidentRows);
+    }
 
-    return runs.filter((run) => {
-      const matchesQuery =
-        normalizedQuery.length === 0 ||
-        run.id.toLowerCase().includes(normalizedQuery) ||
-        run.workspace.toLowerCase().includes(normalizedQuery) ||
-        run.scope.toLowerCase().includes(normalizedQuery) ||
-        run.models.some((model) => model.toLowerCase().includes(normalizedQuery));
-      const matchesStatus = selectedStatuses.length === 0 || selectedStatuses.includes(run.status);
-      const matchesType = selectedTypes.length === 0 || selectedTypes.includes(run.type);
+    void load();
+  }, [activeWorkspace, query, selectedStatuses, selectedTypes]);
 
-      return matchesQuery && matchesStatus && matchesType;
-    });
-  }, [query, selectedStatuses, selectedTypes]);
-
-  const selectedRun = selectedRunId ? runs.find((run) => run.id === selectedRunId) ?? null : null;
+  useEffect(() => {
+    if (!selectedRunId) return;
+    void getRunDetail(selectedRunId).then(setSelectedRun);
+  }, [selectedRunId]);
 
   const kpis = {
     total: runs.length,
-    running: runs.filter((run) => run.status === "Running").length,
-    failed: runs.filter((run) => run.status === "Failed").length,
-    avgDelta: "+2.4%",
-    lastCompleted: "17 Mar, 09:22",
+    running: runs.filter((run) => run.status === "running").length,
+    failed: runs.filter((run) => run.status === "failed").length,
+    avgDelta:
+      runs.filter((run) => run.visibility_delta !== null && run.visibility_delta !== undefined).reduce((sum, run) => sum + (run.visibility_delta ?? 0), 0) /
+      Math.max(runs.filter((run) => run.visibility_delta !== null && run.visibility_delta !== undefined).length, 1),
+    lastCompleted: runs.find((run) => run.completed_at)?.completed_at ?? null,
   };
 
-  const toggleStatusFilter = (status: RunStatus) => {
-    setSelectedStatuses((current) =>
-      current.includes(status) ? current.filter((item) => item !== status) : [...current, status]
-    );
-  };
-
-  const toggleTypeFilter = (type: RunType) => {
-    setSelectedTypes((current) => (current.includes(type) ? current.filter((item) => item !== type) : [...current, type]));
-  };
+  const statusOptions = ["completed", "running", "queued", "failed"];
+  const typeOptions = ["full_eval", "prompt_only", "reingest", "backfill"];
+  const hasRunsData = runs.length > 0;
 
   return (
     <div className="space-y-6 pb-8">
@@ -268,36 +123,20 @@ export function RunsManager() {
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-        <Card>
-          <CardContent className="pt-6">
-            <p className="text-xs uppercase tracking-[0.22em] text-muted-foreground">Total Runs</p>
-            <p className="mt-2 text-2xl font-semibold">{kpis.total}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <p className="text-xs uppercase tracking-[0.22em] text-muted-foreground">Running Now</p>
-            <p className="mt-2 text-2xl font-semibold">{kpis.running}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <p className="text-xs uppercase tracking-[0.22em] text-muted-foreground">Failed Runs</p>
-            <p className="mt-2 text-2xl font-semibold">{kpis.failed}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <p className="text-xs uppercase tracking-[0.22em] text-muted-foreground">Avg Visibility Delta</p>
-            <p className="mt-2 text-2xl font-semibold">{kpis.avgDelta}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <p className="text-xs uppercase tracking-[0.22em] text-muted-foreground">Last Completed</p>
-            <p className="mt-2 text-base font-semibold">{kpis.lastCompleted}</p>
-          </CardContent>
-        </Card>
+        {[
+          ["Total Runs", kpis.total],
+          ["Running Now", kpis.running],
+          ["Failed Runs", kpis.failed],
+          ["Avg Visibility Delta", `${kpis.avgDelta.toFixed(1)}%`],
+          ["Last Completed", kpis.lastCompleted ? formatDateTime(kpis.lastCompleted) : "n/a"],
+        ].map(([label, value]) => (
+          <Card key={String(label)}>
+            <CardContent className="pt-6">
+              <p className="text-xs uppercase tracking-[0.22em] text-muted-foreground">{label}</p>
+              <p className="mt-2 text-2xl font-semibold">{value}</p>
+            </CardContent>
+          </Card>
+        ))}
       </div>
 
       <Card>
@@ -306,13 +145,7 @@ export function RunsManager() {
             <div className="flex flex-wrap gap-2">
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button variant="outline">
-                    {selectedStatuses.length === 0
-                      ? "All Statuses"
-                      : selectedStatuses.length === 1
-                        ? selectedStatuses[0]
-                        : `${selectedStatuses.length} statuses`}
-                  </Button>
+                  <Button variant="outline">{selectedStatuses.length === 0 ? "All Statuses" : `${selectedStatuses.length} statuses`}</Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" className="w-[240px]">
                   <DropdownMenuLabel>Filter Status</DropdownMenuLabel>
@@ -321,29 +154,17 @@ export function RunsManager() {
                     All Statuses
                   </DropdownMenuCheckboxItem>
                   <DropdownMenuSeparator />
-                  {statusOptions
-                    .filter((status): status is RunStatus => status !== "All")
-                    .map((status) => (
-                      <DropdownMenuCheckboxItem
-                        key={status}
-                        checked={selectedStatuses.includes(status)}
-                        onCheckedChange={() => toggleStatusFilter(status)}
-                      >
-                        {status}
-                      </DropdownMenuCheckboxItem>
-                    ))}
+                  {statusOptions.map((status) => (
+                    <DropdownMenuCheckboxItem key={status} checked={selectedStatuses.includes(status)} onCheckedChange={() => setSelectedStatuses((current) => current.includes(status) ? current.filter((item) => item !== status) : [...current, status])}>
+                      {titleize(status)}
+                    </DropdownMenuCheckboxItem>
+                  ))}
                 </DropdownMenuContent>
               </DropdownMenu>
 
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button variant="outline">
-                    {selectedTypes.length === 0
-                      ? "All Run Types"
-                      : selectedTypes.length === 1
-                        ? selectedTypes[0]
-                        : `${selectedTypes.length} types`}
-                  </Button>
+                  <Button variant="outline">{selectedTypes.length === 0 ? "All Run Types" : `${selectedTypes.length} types`}</Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" className="w-[240px]">
                   <DropdownMenuLabel>Filter Run Type</DropdownMenuLabel>
@@ -352,120 +173,80 @@ export function RunsManager() {
                     All Run Types
                   </DropdownMenuCheckboxItem>
                   <DropdownMenuSeparator />
-                  {typeOptions
-                    .filter((type): type is RunType => type !== "All")
-                    .map((type) => (
-                      <DropdownMenuCheckboxItem
-                        key={type}
-                        checked={selectedTypes.includes(type)}
-                        onCheckedChange={() => toggleTypeFilter(type)}
-                      >
-                        {type}
-                      </DropdownMenuCheckboxItem>
-                    ))}
+                  {typeOptions.map((type) => (
+                    <DropdownMenuCheckboxItem key={type} checked={selectedTypes.includes(type)} onCheckedChange={() => setSelectedTypes((current) => current.includes(type) ? current.filter((item) => item !== type) : [...current, type])}>
+                      {titleize(type)}
+                    </DropdownMenuCheckboxItem>
+                  ))}
                 </DropdownMenuContent>
               </DropdownMenu>
             </div>
 
             <div className="relative w-full xl:max-w-sm">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="Search run id, scope, workspace, or model"
-                className="pl-9"
-              />
+              <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search run id, scope, or model" className="pl-9" />
             </div>
           </div>
         </CardHeader>
 
         <CardContent className="p-0">
+          {!hasRunsData ? (
+            <div className="flex min-h-[320px] flex-col items-center justify-center px-6 text-center">
+              <DatabaseZap className="mb-4 h-10 w-10 text-muted-foreground" />
+              <h2 className="text-xl font-semibold">No runs yet</h2>
+              <p className="mt-2 max-w-lg text-sm text-muted-foreground">
+                This workspace has not recorded any evaluation runs. Once prompts are executed, run history, queue state,
+                and failures will appear here.
+              </p>
+            </div>
+          ) : (
             <Table className="min-w-[1120px]">
-              <TableHeader>
-                <TableRow>
-                  <TableHead className={cn("pl-6", columnSeparatorClass)}>Run ID</TableHead>
-                  <TableHead className={columnSeparatorClass}>Type</TableHead>
-                  <TableHead className={columnSeparatorClass}>Workspace</TableHead>
-                  <TableHead className={columnSeparatorClass}>Scope</TableHead>
-                  <TableHead className={columnSeparatorClass}>Models</TableHead>
-                  <TableHead className={columnSeparatorClass}>Status</TableHead>
-                  <TableHead className={columnSeparatorClass}>Started</TableHead>
-                  <TableHead className={columnSeparatorClass}>Duration</TableHead>
-                  <TableHead className={columnSeparatorClass}>Prompts</TableHead>
-                  <TableHead className={columnSeparatorClass}>Mentions</TableHead>
-                  <TableHead className={columnSeparatorClass}>Visibility Delta</TableHead>
-                  <TableHead className="pr-6 text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-            <TableBody>
-              {filteredRuns.map((run) => (
-                <TableRow
-                  key={run.id}
-                  className={cn("cursor-pointer", selectedRun?.id === run.id && "bg-muted/40")}
-                  onClick={() => setSelectedRunId(run.id)}
-                >
-                  <TableCell className={cn("pl-6 font-mono text-xs font-medium text-muted-foreground", columnSeparatorClass)}>
-                    {run.id}
-                  </TableCell>
-                  <TableCell className={columnSeparatorClass}>{run.type}</TableCell>
-                  <TableCell className={columnSeparatorClass}>{run.workspace}</TableCell>
-                  <TableCell className={cn("max-w-[220px] truncate", columnSeparatorClass)} title={run.scope}>
-                    {run.scope}
-                  </TableCell>
-                  <TableCell className={cn("max-w-[160px] truncate text-muted-foreground", columnSeparatorClass)} title={run.models.join(", ")}>
-                    {run.models.join(", ")}
-                  </TableCell>
+            <TableHeader>
+              <TableRow>
+                <TableHead className={cn("pl-6", columnSeparatorClass)}>Run ID</TableHead>
+                <TableHead className={columnSeparatorClass}>Type</TableHead>
+                <TableHead className={columnSeparatorClass}>Workspace</TableHead>
+                <TableHead className={columnSeparatorClass}>Scope</TableHead>
+                <TableHead className={columnSeparatorClass}>Models</TableHead>
+                <TableHead className={columnSeparatorClass}>Status</TableHead>
+                <TableHead className={columnSeparatorClass}>Started</TableHead>
+                <TableHead className={columnSeparatorClass}>Duration</TableHead>
+                <TableHead className={columnSeparatorClass}>Prompts</TableHead>
+                <TableHead className={columnSeparatorClass}>Mentions</TableHead>
+                <TableHead className={columnSeparatorClass}>Visibility Delta</TableHead>
+                <TableHead className="pr-6 text-right">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+              <TableBody>
+              {runs.map((run) => (
+                <TableRow key={run.id} className={cn("cursor-pointer", selectedRunId === run.id && "bg-muted/40")} onClick={() => setSelectedRunId(run.id)}>
+                  <TableCell className={cn("pl-6 font-mono text-xs font-medium text-muted-foreground", columnSeparatorClass)}>{run.id}</TableCell>
+                  <TableCell className={columnSeparatorClass}>{titleize(run.run_type)}</TableCell>
+                  <TableCell className={columnSeparatorClass}>{activeWorkspace?.name ?? "n/a"}</TableCell>
+                  <TableCell className={cn("max-w-[220px] truncate", columnSeparatorClass)} title={run.scope_description ?? ""}>{run.scope_description}</TableCell>
+                  <TableCell className={cn("max-w-[160px] truncate text-muted-foreground", columnSeparatorClass)} title={run.selected_models.join(", ")}>{run.selected_models.join(", ")}</TableCell>
                   <TableCell className={columnSeparatorClass}>
-                    <span className={cn("inline-flex rounded-full border px-2 py-1 text-xs font-medium", statusClasses(run.status))}>
-                      {run.status}
-                    </span>
+                    <span className={cn("inline-flex rounded-full border px-2 py-1 text-xs font-medium", statusClasses(run.status))}>{titleize(run.status)}</span>
                   </TableCell>
-                  <TableCell className={columnSeparatorClass}>{run.started}</TableCell>
-                  <TableCell className={columnSeparatorClass}>{run.duration}</TableCell>
-                  <TableCell className={columnSeparatorClass}>{run.prompts}</TableCell>
-                  <TableCell className={columnSeparatorClass}>{run.mentions}</TableCell>
-                  <TableCell className={cn("font-medium", columnSeparatorClass)}>{run.visibilityDelta}</TableCell>
+                  <TableCell className={columnSeparatorClass}>{formatDateTime(run.started_at)}</TableCell>
+                  <TableCell className={columnSeparatorClass}>{formatDuration(run.duration_seconds)}</TableCell>
+                  <TableCell className={columnSeparatorClass}>{run.prompt_count}</TableCell>
+                  <TableCell className={columnSeparatorClass}>{run.mentions_count}</TableCell>
+                  <TableCell className={cn("font-medium", columnSeparatorClass)}>{run.visibility_delta?.toFixed(1) ?? "Pending"}{run.visibility_delta !== null && run.visibility_delta !== undefined ? "%" : ""}</TableCell>
                   <TableCell className="pr-6 text-right">
                     <div className="flex justify-end gap-1">
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        title="View details"
-                        aria-label={`View ${run.id}`}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          setSelectedRunId(run.id);
-                        }}
-                      >
+                      <Button variant="ghost" size="icon-sm" title="View details" onClick={(event) => { event.stopPropagation(); setSelectedRunId(run.id); }}>
                         <Eye className="h-4 w-4" />
                       </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        title="Retry run"
-                        aria-label={`Retry ${run.id}`}
-                        onClick={(event) => event.stopPropagation()}
-                      >
+                      <Button variant="ghost" size="icon-sm" title="Retry run" onClick={(event) => event.stopPropagation()}>
                         <RefreshCcw className="h-4 w-4" />
                       </Button>
-                      {run.status === "Running" ? (
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          title="Cancel run"
-                          aria-label={`Cancel ${run.id}`}
-                          onClick={(event) => event.stopPropagation()}
-                        >
+                      {run.status === "running" ? (
+                        <Button variant="ghost" size="icon-sm" title="Cancel run" onClick={(event) => event.stopPropagation()}>
                           <PauseCircle className="h-4 w-4" />
                         </Button>
                       ) : (
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          title="Duplicate configuration"
-                          aria-label={`Duplicate ${run.id}`}
-                          onClick={(event) => event.stopPropagation()}
-                        >
+                        <Button variant="ghost" size="icon-sm" title="Duplicate configuration" onClick={(event) => event.stopPropagation()}>
                           <PlayCircle className="h-4 w-4" />
                         </Button>
                       )}
@@ -474,13 +255,7 @@ export function RunsManager() {
                 </TableRow>
               ))}
             </TableBody>
-          </Table>
-
-          {filteredRuns.length === 0 && (
-            <div className="px-6 py-16 text-center">
-              <p className="text-lg font-medium">No runs match the current filters.</p>
-              <p className="mt-1 text-sm text-muted-foreground">Adjust the status, type, or search query.</p>
-            </div>
+            </Table>
           )}
         </CardContent>
       </Card>
@@ -492,37 +267,38 @@ export function RunsManager() {
           </CardHeader>
           <CardContent className="space-y-4 pt-6">
             <div className="grid gap-3 sm:grid-cols-4">
-              <div className="rounded-xl border bg-muted/20 p-4">
-                <p className="text-xs uppercase tracking-[0.22em] text-muted-foreground">Workers</p>
-                <p className="mt-2 text-2xl font-semibold">{workerQueue.workersTotal}</p>
-              </div>
-              <div className="rounded-xl border bg-muted/20 p-4">
-                <p className="text-xs uppercase tracking-[0.22em] text-muted-foreground">Busy</p>
-                <p className="mt-2 text-2xl font-semibold">{workerQueue.workersBusy}</p>
-              </div>
-              <div className="rounded-xl border bg-muted/20 p-4">
-                <p className="text-xs uppercase tracking-[0.22em] text-muted-foreground">Queued Prompt Jobs</p>
-                <p className="mt-2 text-2xl font-semibold">{workerQueue.queuedPromptJobs}</p>
-              </div>
-              <div className="rounded-xl border bg-muted/20 p-4">
-                <p className="text-xs uppercase tracking-[0.22em] text-muted-foreground">Active Runs</p>
-                <p className="mt-2 text-2xl font-semibold">{workerQueue.activeRuns}</p>
-              </div>
+              {[
+                ["Workers", workers.length],
+                ["Busy", workers.filter((worker) => worker.status === "busy").length],
+                ["Queued Prompt Jobs", queueJobs.filter((job) => job.status === "queued").length],
+                ["Active Runs", runs.filter((run) => run.status === "running").length],
+              ].map(([label, value]) => (
+                <div key={String(label)} className="rounded-xl border bg-muted/20 p-4">
+                  <p className="text-xs uppercase tracking-[0.22em] text-muted-foreground">{label}</p>
+                  <p className="mt-2 text-2xl font-semibold">{value}</p>
+                </div>
+              ))}
             </div>
 
             <div className="space-y-3">
-              {workerQueue.queuedItems.map((job) => (
-                <div key={`${job.prompt}-${job.connector}`} className="rounded-xl border bg-muted/20 p-4">
+              {queueJobs.length === 0 ? (
+                <div className="rounded-xl border border-dashed bg-muted/10 p-4 text-sm text-muted-foreground">
+                  No queued prompt jobs for this workspace.
+                </div>
+              ) : (
+                queueJobs.slice(0, 4).map((job) => (
+                <div key={job.id} className="rounded-xl border bg-muted/20 p-4">
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <p className="font-medium">{job.prompt}</p>
-                      <p className="mt-1 text-sm text-muted-foreground">{job.connector}</p>
+                      <p className="font-medium">{String(job.payload_json?.prompt ?? "Queued prompt job")}</p>
+                      <p className="mt-1 text-sm text-muted-foreground">{job.connector_id ? `Connector ${job.connector_id.slice(0, 8)}` : "No connector assigned"}</p>
                     </div>
-                    <span className="text-sm font-medium">{job.status}</span>
+                    <span className="text-sm font-medium">{titleize(job.status)}</span>
                   </div>
-                  <p className="mt-2 text-xs text-muted-foreground">Assignment: {job.assigned}</p>
+                  <p className="mt-2 text-xs text-muted-foreground">Assignment: {job.worker_id ? `Worker ${job.worker_id.slice(0, 8)}` : "Queued"}</p>
                 </div>
-              ))}
+                ))
+              )}
             </div>
           </CardContent>
         </Card>
@@ -532,14 +308,18 @@ export function RunsManager() {
             <CardTitle className="text-base">Connector Failures</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3 pt-6">
-            {recentFailures.map((failure) => (
+            {failures.length === 0 ? (
+              <div className="rounded-xl border border-dashed bg-muted/10 p-4 text-sm text-muted-foreground">
+                No connector failures reported for this workspace.
+              </div>
+            ) : failures.map((failure) => (
               <div key={failure.id} className="rounded-xl border border-rose-200 bg-rose-50/60 p-4">
                 <div className="flex items-start gap-3">
                   <AlertTriangle className="mt-0.5 h-4 w-4 text-rose-700" />
                   <div>
-                    <p className="font-medium">{failure.area}</p>
-                    <p className="mt-1 text-sm text-rose-900">{failure.issue}</p>
-                    <p className="mt-2 text-xs text-muted-foreground">{failure.id} • {failure.time}</p>
+                    <p className="font-medium">{failure.title}</p>
+                    <p className="mt-1 text-sm text-rose-900">{failure.detail}</p>
+                    <p className="mt-2 text-xs text-muted-foreground">{formatDateTime(failure.occurred_at)}</p>
                   </div>
                 </div>
               </div>
@@ -548,16 +328,16 @@ export function RunsManager() {
         </Card>
       </div>
 
-      {selectedRun && (
+      {selectedRunId && selectedRun && (
         <div className="fixed inset-y-0 right-0 z-50 w-full max-w-xl border-l bg-background shadow-2xl">
           <div className="flex h-full flex-col">
             <div className="flex items-start justify-between border-b px-6 py-5">
               <div>
                 <p className="font-mono text-xs text-muted-foreground">{selectedRun.id}</p>
-                <h2 className="mt-1 text-xl font-semibold">{selectedRun.type}</h2>
+                <h2 className="mt-1 text-xl font-semibold">{titleize(selectedRun.run_type)}</h2>
                 <p className="mt-1 text-sm text-muted-foreground">{selectedRun.summary}</p>
               </div>
-              <Button variant="ghost" size="icon-sm" onClick={() => setSelectedRunId(null)} aria-label="Close run details">
+              <Button variant="ghost" size="icon-sm" onClick={() => setSelectedRunId(null)}>
                 <X className="h-4 w-4" />
               </Button>
             </div>
@@ -565,42 +345,30 @@ export function RunsManager() {
             <div className="flex-1 space-y-6 overflow-y-auto px-6 py-6">
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="rounded-xl border bg-muted/20 p-4">
-                  <div className="flex items-center gap-2 text-sm font-medium">
-                    <Activity className="h-4 w-4" />
-                    Status
-                  </div>
-                  <p className="mt-3 text-base font-semibold">{selectedRun.status}</p>
+                  <div className="flex items-center gap-2 text-sm font-medium"><Activity className="h-4 w-4" />Status</div>
+                  <p className="mt-3 text-base font-semibold">{titleize(selectedRun.status)}</p>
                 </div>
                 <div className="rounded-xl border bg-muted/20 p-4">
-                  <div className="flex items-center gap-2 text-sm font-medium">
-                    <Clock3 className="h-4 w-4" />
-                    Duration
-                  </div>
-                  <p className="mt-3 text-base font-semibold">{selectedRun.duration}</p>
+                  <div className="flex items-center gap-2 text-sm font-medium"><Clock3 className="h-4 w-4" />Duration</div>
+                  <p className="mt-3 text-base font-semibold">{formatDuration(selectedRun.duration_seconds)}</p>
                 </div>
                 <div className="rounded-xl border bg-muted/20 p-4">
-                  <div className="flex items-center gap-2 text-sm font-medium">
-                    <DatabaseZap className="h-4 w-4" />
-                    Mentions Collected
-                  </div>
-                  <p className="mt-3 text-base font-semibold">{selectedRun.mentions}</p>
+                  <div className="flex items-center gap-2 text-sm font-medium"><DatabaseZap className="h-4 w-4" />Mentions Collected</div>
+                  <p className="mt-3 text-base font-semibold">{selectedRun.mentions_count}</p>
                 </div>
                 <div className="rounded-xl border bg-muted/20 p-4">
-                  <div className="flex items-center gap-2 text-sm font-medium">
-                    <Download className="h-4 w-4" />
-                    Visibility Delta
-                  </div>
-                  <p className="mt-3 text-base font-semibold">{selectedRun.visibilityDelta}</p>
+                  <div className="flex items-center gap-2 text-sm font-medium"><Download className="h-4 w-4" />Visibility Delta</div>
+                  <p className="mt-3 text-base font-semibold">{selectedRun.visibility_delta?.toFixed(1) ?? "Pending"}{selectedRun.visibility_delta !== null && selectedRun.visibility_delta !== undefined ? "%" : ""}</p>
                 </div>
               </div>
 
               <section className="space-y-3">
                 <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-muted-foreground">Timeline</h3>
                 <div className="space-y-3">
-                  {selectedRun.steps.map((step) => (
-                    <div key={step.label} className="flex items-center gap-3">
+                  {selectedRun.step_events.map((step) => (
+                    <div key={step.id} className="flex items-center gap-3">
                       <span className={cn("h-2.5 w-2.5 rounded-full", stepClasses(step.status))} />
-                      <p className="text-sm">{step.label}</p>
+                      <p className="text-sm">{step.step_name}</p>
                     </div>
                   ))}
                 </div>
@@ -609,13 +377,13 @@ export function RunsManager() {
               <section className="space-y-3">
                 <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-muted-foreground">Per-Model Status</h3>
                 <div className="space-y-2">
-                  {selectedRun.perModel.map((item) => (
-                    <div key={item.model} className="flex items-center justify-between rounded-lg border px-3 py-2">
+                  {selectedRun.scrape_results.map((item) => (
+                    <div key={item.id} className="flex items-center justify-between rounded-lg border px-3 py-2">
                       <div>
-                        <p className="font-medium">{item.model}</p>
-                        <p className="text-xs text-muted-foreground">{item.prompts} prompts scoped</p>
+                        <p className="font-medium">{item.llm_model}</p>
+                        <p className="text-xs text-muted-foreground">{item.mentions_count} mentions collected</p>
                       </div>
-                      <p className="text-sm">{item.status}</p>
+                      <p className="text-sm">{item.target_mentioned ? "Target mentioned" : "No target mention"}</p>
                     </div>
                   ))}
                 </div>
@@ -625,9 +393,7 @@ export function RunsManager() {
                 <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-muted-foreground">Run Logs</h3>
                 <div className="space-y-2 rounded-xl border bg-muted/20 p-4">
                   {selectedRun.logs.map((log) => (
-                    <p key={log} className="font-mono text-xs text-muted-foreground">
-                      {log}
-                    </p>
+                    <p key={log.id} className="font-mono text-xs text-muted-foreground">{log.message}</p>
                   ))}
                 </div>
               </section>

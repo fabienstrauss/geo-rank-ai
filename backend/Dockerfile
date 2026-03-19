@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY start-dev.sh /app/start-dev.sh
-RUN chmod +x /app/start-dev.sh
+COPY . /app
+RUN chmod +x /app/start-prod.sh
 
-CMD ["sh", "/app/start-dev.sh"]
+CMD ["sh", "/app/start-prod.sh"]
