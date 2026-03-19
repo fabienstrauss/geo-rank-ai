@@ -22,6 +22,15 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from database import Base
 
 
+def value_enum(enum_cls: type[enum.Enum], name: str) -> Enum:
+    return Enum(
+        enum_cls,
+        name=name,
+        values_callable=lambda members: [member.value for member in members],
+        validate_strings=True,
+    )
+
+
 class PromptStatus(str, enum.Enum):
     DRAFT = "draft"
     ACTIVE = "active"
@@ -104,6 +113,9 @@ class Workspace(Base):
     metric_snapshots: Mapped[list["PromptMetricSnapshot"]] = relationship(
         "PromptMetricSnapshot", back_populates="workspace", cascade="all, delete-orphan"
     )
+    competitor_snapshots: Mapped[list["CompetitorSnapshot"]] = relationship(
+        "CompetitorSnapshot", back_populates="workspace", cascade="all, delete-orphan"
+    )
     queue_jobs: Mapped[list["QueueJob"]] = relationship(
         "QueueJob", back_populates="workspace", cascade="all, delete-orphan"
     )
@@ -149,7 +161,10 @@ class Prompt(Base):
     expected_competitors: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     selected_models: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     status: Mapped[PromptStatus] = mapped_column(
-        Enum(PromptStatus, name="prompt_status"), nullable=False, default=PromptStatus.DRAFT, server_default=PromptStatus.DRAFT.value
+        value_enum(PromptStatus, "prompt_status"),
+        nullable=False,
+        default=PromptStatus.DRAFT,
+        server_default=PromptStatus.DRAFT.value,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
@@ -177,10 +192,16 @@ class Run(Base):
         UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
     )
     run_type: Mapped[RunType] = mapped_column(
-        Enum(RunType, name="run_type"), nullable=False, default=RunType.FULL_EVAL, server_default=RunType.FULL_EVAL.value
+        value_enum(RunType, "run_type"),
+        nullable=False,
+        default=RunType.FULL_EVAL,
+        server_default=RunType.FULL_EVAL.value,
     )
     status: Mapped[RunStatus] = mapped_column(
-        Enum(RunStatus, name="run_status"), nullable=False, default=RunStatus.QUEUED, server_default=RunStatus.QUEUED.value
+        value_enum(RunStatus, "run_status"),
+        nullable=False,
+        default=RunStatus.QUEUED,
+        server_default=RunStatus.QUEUED.value,
     )
     scope_description: Mapped[str | None] = mapped_column(String(255), nullable=True)
     scope_filters: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
@@ -223,7 +244,7 @@ class RunPrompt(Base):
         UUID(as_uuid=True), ForeignKey("prompts.id", ondelete="CASCADE"), nullable=False, index=True
     )
     status: Mapped[QueueJobStatus] = mapped_column(
-        Enum(QueueJobStatus, name="run_prompt_status"),
+        value_enum(QueueJobStatus, "run_prompt_status"),
         nullable=False,
         default=QueueJobStatus.QUEUED,
         server_default=QueueJobStatus.QUEUED.value,
@@ -284,7 +305,7 @@ class RunStepEvent(Base):
         UUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=False, index=True
     )
     step_name: Mapped[str] = mapped_column(String(150), nullable=False)
-    status: Mapped[QueueJobStatus] = mapped_column(Enum(QueueJobStatus, name="run_step_status"), nullable=False)
+    status: Mapped[QueueJobStatus] = mapped_column(value_enum(QueueJobStatus, "run_step_status"), nullable=False)
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
@@ -330,6 +351,23 @@ class PromptMetricSnapshot(Base):
     prompt: Mapped["Prompt | None"] = relationship("Prompt", back_populates="metric_snapshots")
 
 
+class CompetitorSnapshot(Base):
+    __tablename__ = "competitor_snapshots"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    brand: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    snapshot_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    avg_rank: Mapped[float] = mapped_column(Float, nullable=False)
+    share_of_voice: Mapped[float] = mapped_column(Float, nullable=False)
+    metadata_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    workspace: Mapped["Workspace"] = relationship("Workspace", back_populates="competitor_snapshots")
+
+
 class SourceCitation(Base):
     __tablename__ = "source_citations"
 
@@ -356,9 +394,11 @@ class Connector(Base):
         UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
     )
     name: Mapped[str] = mapped_column(String(150), nullable=False)
-    connector_type: Mapped[ConnectorType] = mapped_column(Enum(ConnectorType, name="connector_type"), nullable=False)
+    connector_type: Mapped[ConnectorType] = mapped_column(
+        value_enum(ConnectorType, "connector_type"), nullable=False
+    )
     health_status: Mapped[ConnectorHealth] = mapped_column(
-        Enum(ConnectorHealth, name="connector_health"),
+        value_enum(ConnectorHealth, "connector_health"),
         nullable=False,
         default=ConnectorHealth.HEALTHY,
         server_default=ConnectorHealth.HEALTHY.value,
@@ -393,7 +433,7 @@ class Worker(Base):
     worker_name: Mapped[str] = mapped_column(String(150), nullable=False, unique=True)
     pool_name: Mapped[str] = mapped_column(String(150), nullable=False, index=True)
     status: Mapped[WorkerStatus] = mapped_column(
-        Enum(WorkerStatus, name="worker_status"),
+        value_enum(WorkerStatus, "worker_status"),
         nullable=False,
         default=WorkerStatus.ONLINE,
         server_default=WorkerStatus.ONLINE.value,
@@ -433,7 +473,7 @@ class QueueJob(Base):
         UUID(as_uuid=True), ForeignKey("workers.id", ondelete="SET NULL"), nullable=True, index=True
     )
     status: Mapped[QueueJobStatus] = mapped_column(
-        Enum(QueueJobStatus, name="queue_job_status"),
+        value_enum(QueueJobStatus, "queue_job_status"),
         nullable=False,
         default=QueueJobStatus.QUEUED,
         server_default=QueueJobStatus.QUEUED.value,
@@ -460,7 +500,7 @@ class ConnectorIncident(Base):
         UUID(as_uuid=True), ForeignKey("connectors.id", ondelete="SET NULL"), nullable=True, index=True
     )
     severity: Mapped[IncidentSeverity] = mapped_column(
-        Enum(IncidentSeverity, name="incident_severity"), nullable=False
+        value_enum(IncidentSeverity, "incident_severity"), nullable=False
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     detail: Mapped[str] = mapped_column(Text, nullable=False)

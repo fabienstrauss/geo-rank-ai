@@ -1,13 +1,10 @@
-import os
-
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
+from config import get_settings
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+psycopg2://georank:georank@localhost:5432/georank_db",
-)
+
+DATABASE_URL = get_settings().database_url
 
 
 engine = create_engine(DATABASE_URL, future=True)
