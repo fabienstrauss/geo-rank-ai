@@ -1,6 +1,17 @@
 version: '3.8'
 
 services:
+  db:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: georank
+      POSTGRES_PASSWORD: georank
+      POSTGRES_DB: georank_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
   backend:
     build:
       context: ./backend
@@ -11,6 +22,9 @@ services:
       - ./backend:/app
     environment:
       - ENV=development
+      - DATABASE_URL=postgresql+psycopg2://georank:georank@db:5432/georank_db
+    depends_on:
+      - db
 
   frontend:
     build:
@@ -25,3 +39,6 @@ services:
       - NEXT_PUBLIC_API_URL=http://localhost:8000
     depends_on:
       - backend
+
+volumes:
+  postgres_data:
