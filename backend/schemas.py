@@ -155,11 +155,20 @@ class RunSummaryRead(BaseModel):
     updated_at: datetime
 
 
+class RunListSummaryRead(BaseModel):
+    total: int
+    running: int
+    failed: int
+    avg_visibility_delta: float | None
+    last_completed_at: datetime | None
+
+
 class RunListRead(BaseModel):
     items: list[RunSummaryRead]
     total: int
     limit: int
     offset: int
+    summary: RunListSummaryRead
 
 
 class RunStepEventRead(BaseModel):

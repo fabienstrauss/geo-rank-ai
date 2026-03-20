@@ -60,6 +60,13 @@ export type RunList = {
   total: number;
   limit: number;
   offset: number;
+  summary: {
+    total: number;
+    running: number;
+    failed: number;
+    avg_visibility_delta?: number | null;
+    last_completed_at?: string | null;
+  };
 };
 
 export type RunDetail = Run & {

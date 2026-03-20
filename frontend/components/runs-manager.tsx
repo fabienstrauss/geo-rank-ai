@@ -116,13 +116,11 @@ export function RunsManager() {
   }, [selectedRunId]);
 
   const kpis = {
-    total: runPage.total,
-    running: runs.filter((run) => run.status === "running").length,
-    failed: runs.filter((run) => run.status === "failed").length,
-    avgDelta:
-      runs.filter((run) => run.visibility_delta !== null && run.visibility_delta !== undefined).reduce((sum, run) => sum + (run.visibility_delta ?? 0), 0) /
-      Math.max(runs.filter((run) => run.visibility_delta !== null && run.visibility_delta !== undefined).length, 1),
-    lastCompleted: runs.find((run) => run.completed_at)?.completed_at ?? null,
+    total: runPage.summary?.total ?? runPage.total,
+    running: runPage.summary?.running ?? 0,
+    failed: runPage.summary?.failed ?? 0,
+    avgDelta: runPage.summary?.avg_visibility_delta ?? 0,
+    lastCompleted: runPage.summary?.last_completed_at ?? null,
   };
 
   const statusOptions = ["completed", "running", "queued", "failed"];

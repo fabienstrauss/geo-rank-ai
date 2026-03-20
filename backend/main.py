@@ -20,6 +20,7 @@ from models import (
     ProviderCredential,
     QueueJob,
     Run,
+    RunStatus,
     ScrapeResult,
     SourceCitation,
     Workspace,
@@ -37,6 +38,7 @@ from schemas import (
     ConnectorUpdate,
     DashboardRead,
     RunListRead,
+    RunListSummaryRead,
     PromptCreate,
     PromptListRead,
     PromptRead,
@@ -421,9 +423,31 @@ def list_runs(
     sort_column = sort_columns.get(sort_by, Run.created_at)
     query = query.order_by(sort_column.asc() if sort_order == "asc" else sort_column.desc(), Run.created_at.desc())
 
-    total = db.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
+    filtered_runs = query.order_by(None).subquery()
+    summary_row = db.execute(
+        select(
+            func.count().label("total"),
+            func.count().filter(filtered_runs.c.status == RunStatus.RUNNING).label("running"),
+            func.count().filter(filtered_runs.c.status == RunStatus.FAILED).label("failed"),
+            func.avg(filtered_runs.c.visibility_delta).label("avg_visibility_delta"),
+            func.max(filtered_runs.c.completed_at).label("last_completed_at"),
+        )
+    ).one()
+    total = int(summary_row.total or 0)
     items = db.scalars(query.offset(offset).limit(limit)).all()
-    return RunListRead(items=items, total=total, limit=limit, offset=offset)
+    return RunListRead(
+        items=items,
+        total=total,
+        limit=limit,
+        offset=offset,
+        summary=RunListSummaryRead(
+            total=total,
+            running=int(summary_row.running or 0),
+            failed=int(summary_row.failed or 0),
+            avg_visibility_delta=round(float(summary_row.avg_visibility_delta), 1) if summary_row.avg_visibility_delta is not None else None,
+            last_completed_at=summary_row.last_completed_at,
+        ),
+    )
 
 
 @app.get("/runs/{run_id}", response_model=RunDetailRead)
