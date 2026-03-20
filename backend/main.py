@@ -37,6 +37,7 @@ from schemas import (
     ConnectorRead,
     ConnectorUpdate,
     DashboardRead,
+    PromptListSummaryRead,
     RunListRead,
     RunListSummaryRead,
     PromptCreate,
@@ -151,6 +152,37 @@ def get_latest_scrape_results(db: Session, prompt_ids: list[UUID]) -> dict[UUID,
         )
     ).all()
     return {result.prompt_id: result for result in results}
+
+
+def get_prompt_list_summary(db: Session, base_query):
+    filtered_prompts = base_query.subquery()
+    latest_snapshot_subquery = (
+        select(
+            PromptMetricSnapshot.prompt_id.label("prompt_id"),
+            func.max(PromptMetricSnapshot.snapshot_at).label("snapshot_at"),
+        )
+        .join(filtered_prompts, PromptMetricSnapshot.prompt_id == filtered_prompts.c.id)
+        .group_by(PromptMetricSnapshot.prompt_id)
+        .subquery()
+    )
+    return db.execute(
+        select(
+            func.count(func.distinct(filtered_prompts.c.id)).label("total"),
+            func.count(func.distinct(filtered_prompts.c.category_id)).label("visible_categories"),
+            func.avg(PromptMetricSnapshot.visibility_score).label("avg_visibility"),
+        ).select_from(
+            filtered_prompts.outerjoin(
+                latest_snapshot_subquery,
+                filtered_prompts.c.id == latest_snapshot_subquery.c.prompt_id,
+            ).outerjoin(
+                PromptMetricSnapshot,
+                and_(
+                    PromptMetricSnapshot.prompt_id == latest_snapshot_subquery.c.prompt_id,
+                    PromptMetricSnapshot.snapshot_at == latest_snapshot_subquery.c.snapshot_at,
+                ),
+            )
+        )
+    ).one()
 
 
 @app.get("/")
@@ -285,20 +317,21 @@ def list_prompts(
     sort_order: str = Query(default="desc"),
 ):
     get_workspace_or_404(db, workspace_id)
-    query = select(Prompt).options(selectinload(Prompt.category)).where(Prompt.workspace_id == workspace_id)
+    base_query = select(Prompt).where(Prompt.workspace_id == workspace_id)
     if category_ids:
-        query = query.where(Prompt.category_id.in_(category_ids))
+        base_query = base_query.where(Prompt.category_id.in_(category_ids))
     if status:
-        query = query.where(Prompt.status == status)
+        base_query = base_query.where(Prompt.status == status)
     if search:
         normalized = f"%{search.strip().lower()}%"
-        query = query.where(
+        base_query = base_query.where(
             or_(
                 func.lower(Prompt.prompt_text).like(normalized),
                 func.lower(Prompt.target_brand).like(normalized),
                 func.lower(func.coalesce(cast(Prompt.selected_models, String), "")).like(normalized),
             )
         )
+    query = base_query.options(selectinload(Prompt.category))
     sort_columns = {
         "created_at": Prompt.created_at,
         "updated_at": Prompt.updated_at,
@@ -308,7 +341,8 @@ def list_prompts(
     sort_column = sort_columns.get(sort_by, Prompt.created_at)
     query = query.order_by(sort_column.asc() if sort_order == "asc" else sort_column.desc())
 
-    total = db.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
+    summary_row = get_prompt_list_summary(db, base_query)
+    total = int(summary_row.total or 0)
     prompts = db.scalars(query.offset(offset).limit(limit)).all()
     latest_snapshots = get_latest_prompt_snapshots(db, [prompt.id for prompt in prompts])
     latest_results = get_latest_scrape_results(db, [prompt.id for prompt in prompts])
@@ -335,7 +369,17 @@ def list_prompts(
                 last_run_at=latest_result.executed_at if latest_result else None,
             )
         )
-    return PromptListRead(items=items, total=total, limit=limit, offset=offset)
+    return PromptListRead(
+        items=items,
+        total=total,
+        limit=limit,
+        offset=offset,
+        summary=PromptListSummaryRead(
+            total=total,
+            visible_categories=int(summary_row.visible_categories or 0),
+            avg_visibility=round(float(summary_row.avg_visibility), 1) if summary_row.avg_visibility is not None else None,
+        ),
+    )
 
 
 @app.post("/workspaces/{workspace_id}/prompts", response_model=PromptRead, status_code=201)
