@@ -185,6 +185,52 @@ def get_prompt_list_summary(db: Session, base_query):
     ).one()
 
 
+def build_prompt_base_query(
+    workspace_id: UUID,
+    category_ids: list[UUID] | None = None,
+    status: str | None = None,
+    search: str | None = None,
+):
+    query = select(Prompt).where(Prompt.workspace_id == workspace_id)
+    if category_ids:
+        query = query.where(Prompt.category_id.in_(category_ids))
+    if status:
+        query = query.where(Prompt.status == status)
+    if search:
+        normalized = f"%{search.strip().lower()}%"
+        query = query.where(
+            or_(
+                func.lower(Prompt.prompt_text).like(normalized),
+                func.lower(Prompt.target_brand).like(normalized),
+                func.lower(func.coalesce(cast(Prompt.selected_models, String), "")).like(normalized),
+            )
+        )
+    return query
+
+
+def build_run_base_query(
+    workspace_id: UUID,
+    statuses: list[str] | None = None,
+    run_types: list[str] | None = None,
+    search: str | None = None,
+):
+    query = select(Run).where(Run.workspace_id == workspace_id)
+    if statuses:
+        query = query.where(Run.status.in_(statuses))
+    if run_types:
+        query = query.where(Run.run_type.in_(run_types))
+    if search:
+        normalized = f"%{search.strip().lower()}%"
+        query = query.where(
+            or_(
+                cast(Run.id, String).ilike(normalized),
+                func.lower(func.coalesce(Run.scope_description, "")).like(normalized),
+                func.lower(func.coalesce(cast(Run.selected_models, String), "")).like(normalized),
+            )
+        )
+    return query
+
+
 @app.get("/")
 def read_root():
     return {
@@ -317,20 +363,12 @@ def list_prompts(
     sort_order: str = Query(default="desc"),
 ):
     get_workspace_or_404(db, workspace_id)
-    base_query = select(Prompt).where(Prompt.workspace_id == workspace_id)
-    if category_ids:
-        base_query = base_query.where(Prompt.category_id.in_(category_ids))
-    if status:
-        base_query = base_query.where(Prompt.status == status)
-    if search:
-        normalized = f"%{search.strip().lower()}%"
-        base_query = base_query.where(
-            or_(
-                func.lower(Prompt.prompt_text).like(normalized),
-                func.lower(Prompt.target_brand).like(normalized),
-                func.lower(func.coalesce(cast(Prompt.selected_models, String), "")).like(normalized),
-            )
-        )
+    base_query = build_prompt_base_query(
+        workspace_id=workspace_id,
+        category_ids=category_ids,
+        status=status,
+        search=search,
+    )
     query = base_query.options(selectinload(Prompt.category))
     sort_columns = {
         "created_at": Prompt.created_at,
@@ -442,20 +480,12 @@ def list_runs(
     sort_order: str = Query(default="desc"),
 ):
     get_workspace_or_404(db, workspace_id)
-    query = select(Run).where(Run.workspace_id == workspace_id)
-    if statuses:
-        query = query.where(Run.status.in_(statuses))
-    if run_types:
-        query = query.where(Run.run_type.in_(run_types))
-    if search:
-        normalized = f"%{search.strip().lower()}%"
-        query = query.where(
-            or_(
-                cast(Run.id, String).ilike(normalized),
-                func.lower(func.coalesce(Run.scope_description, "")).like(normalized),
-                func.lower(func.coalesce(cast(Run.selected_models, String), "")).like(normalized),
-            )
-        )
+    query = build_run_base_query(
+        workspace_id=workspace_id,
+        statuses=statuses,
+        run_types=run_types,
+        search=search,
+    )
     sort_columns = {
         "created_at": Run.created_at,
         "started_at": Run.started_at,
