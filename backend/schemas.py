@@ -128,11 +128,18 @@ class PromptRead(BaseModel):
     last_run_at: datetime | None = None
 
 
+class PromptListSummaryRead(BaseModel):
+    total: int
+    visible_categories: int
+    avg_visibility: float | None
+
+
 class PromptListRead(BaseModel):
     items: list[PromptRead]
     total: int
     limit: int
     offset: int
+    summary: PromptListSummaryRead
 
 
 class RunSummaryRead(BaseModel):

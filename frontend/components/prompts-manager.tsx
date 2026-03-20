@@ -336,9 +336,16 @@ export function PromptsManager() {
   const [defaultModels, setDefaultModels] = useState<ModelOption[]>(["GPT-5", "Claude"]);
   const [categories, setCategories] = useState<PromptCategory[]>([]);
   const [prompts, setPrompts] = useState<Prompt[]>([]);
-  const [promptPage, setPromptPage] = useState<PromptList>({ items: [], total: 0, limit: pageSize, offset: 0 });
+  const [promptPage, setPromptPage] = useState<PromptList>({
+    items: [],
+    total: 0,
+    limit: pageSize,
+    offset: 0,
+    summary: { total: 0, visible_categories: 0, avg_visibility: null },
+  });
   const [query, setQuery] = useState("");
   const [selectedCategoryIds, setSelectedCategoryIds] = useState<string[]>([]);
+  const [selectedStatus, setSelectedStatus] = useState<PromptStatus | "all">("all");
   const [sortBy, setSortBy] = useState<"created_at" | "updated_at" | "prompt_text" | "status">("created_at");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -355,6 +362,7 @@ export function PromptsManager() {
       getCategories(activeWorkspace.id),
       getPromptsFiltered(activeWorkspace.id, {
         categoryIds: selectedCategoryIds,
+        status: selectedStatus === "all" ? undefined : selectedStatus,
         search: query,
         limit: pageSize,
         offset: requestOffset,
@@ -374,7 +382,7 @@ export function PromptsManager() {
       setPromptPage(promptRows);
       setForm((current) => ({ ...current, categoryId: current.categoryId || categoryRows[0]?.id || "" }));
     });
-  }, [activeWorkspace, pageSize, promptPage.offset, query, selectedCategoryIds, sortBy, sortOrder, workspaceId]);
+  }, [activeWorkspace, pageSize, promptPage.offset, query, selectedCategoryIds, selectedStatus, sortBy, sortOrder, workspaceId]);
 
   useEffect(() => {
     void load();
@@ -396,10 +404,7 @@ export function PromptsManager() {
     }, {});
   }, [categories]);
 
-  const avgVisibility =
-    prompts.length > 0
-      ? Math.round(prompts.reduce((sum, prompt) => sum + (prompt.visibility ?? 0), 0) / prompts.length)
-      : 0;
+  const avgVisibility = Math.round(promptPage.summary?.avg_visibility ?? 0);
   const hasPromptData = categories.length > 0 && prompts.length > 0;
 
   const toggleCategoryFilter = (categoryId: string) => {
@@ -480,7 +485,7 @@ export function PromptsManager() {
           </div>
           <div className="rounded-xl border bg-muted/20 p-4">
             <p className="text-xs uppercase tracking-[0.22em] text-muted-foreground">Visible Categories</p>
-            <p className="mt-2 text-2xl font-semibold">{groupedPrompts.length}</p>
+            <p className="mt-2 text-2xl font-semibold">{promptPage.summary?.visible_categories ?? 0}</p>
           </div>
           <div className="rounded-xl border bg-muted/20 p-4">
             <p className="text-xs uppercase tracking-[0.22em] text-muted-foreground">Avg Visibility</p>
@@ -528,6 +533,19 @@ export function PromptsManager() {
                 <FolderPen className="h-4 w-4" />
                 Manage Categories
               </Button>
+
+              <select
+                value={selectedStatus}
+                onChange={(event) => {
+                  setPromptPage((current) => ({ ...current, offset: 0 }));
+                  setSelectedStatus(event.target.value as PromptStatus | "all");
+                }}
+                className={selectClassName}
+              >
+                <option value="all">All Statuses</option>
+                <option value="active">Active</option>
+                <option value="draft">Draft</option>
+              </select>
 
               <select
                 value={`${sortBy}:${sortOrder}`}

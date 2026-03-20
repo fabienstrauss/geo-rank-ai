@@ -37,6 +37,11 @@ export type PromptList = {
   total: number;
   limit: number;
   offset: number;
+  summary: {
+    total: number;
+    visible_categories: number;
+    avg_visibility?: number | null;
+  };
 };
 
 export type Run = {
