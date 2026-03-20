@@ -5,7 +5,7 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import cast, func, or_, select, String
+from sqlalchemy import and_, cast, func, or_, select, String
 from sqlalchemy.orm import Session, selectinload
 
 from config import get_settings
@@ -99,6 +99,56 @@ def get_run_or_404(db: Session, run_id: UUID) -> Run:
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     return run
+
+
+def get_latest_prompt_snapshots(db: Session, prompt_ids: list[UUID]) -> dict[UUID, PromptMetricSnapshot]:
+    if not prompt_ids:
+        return {}
+
+    latest_snapshot_subquery = (
+        select(
+            PromptMetricSnapshot.prompt_id.label("prompt_id"),
+            func.max(PromptMetricSnapshot.snapshot_at).label("snapshot_at"),
+        )
+        .where(PromptMetricSnapshot.prompt_id.in_(prompt_ids))
+        .group_by(PromptMetricSnapshot.prompt_id)
+        .subquery()
+    )
+    snapshots = db.scalars(
+        select(PromptMetricSnapshot).join(
+            latest_snapshot_subquery,
+            and_(
+                PromptMetricSnapshot.prompt_id == latest_snapshot_subquery.c.prompt_id,
+                PromptMetricSnapshot.snapshot_at == latest_snapshot_subquery.c.snapshot_at,
+            ),
+        )
+    ).all()
+    return {snapshot.prompt_id: snapshot for snapshot in snapshots if snapshot.prompt_id}
+
+
+def get_latest_scrape_results(db: Session, prompt_ids: list[UUID]) -> dict[UUID, ScrapeResult]:
+    if not prompt_ids:
+        return {}
+
+    latest_result_subquery = (
+        select(
+            ScrapeResult.prompt_id.label("prompt_id"),
+            func.max(ScrapeResult.executed_at).label("executed_at"),
+        )
+        .where(ScrapeResult.prompt_id.in_(prompt_ids))
+        .group_by(ScrapeResult.prompt_id)
+        .subquery()
+    )
+    results = db.scalars(
+        select(ScrapeResult).join(
+            latest_result_subquery,
+            and_(
+                ScrapeResult.prompt_id == latest_result_subquery.c.prompt_id,
+                ScrapeResult.executed_at == latest_result_subquery.c.executed_at,
+            ),
+        )
+    ).all()
+    return {result.prompt_id: result for result in results}
 
 
 @app.get("/")
@@ -233,7 +283,7 @@ def list_prompts(
     sort_order: str = Query(default="desc"),
 ):
     get_workspace_or_404(db, workspace_id)
-    query = select(Prompt).where(Prompt.workspace_id == workspace_id)
+    query = select(Prompt).options(selectinload(Prompt.category)).where(Prompt.workspace_id == workspace_id)
     if category_ids:
         query = query.where(Prompt.category_id.in_(category_ids))
     if status:
@@ -258,17 +308,12 @@ def list_prompts(
 
     total = db.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
     prompts = db.scalars(query.offset(offset).limit(limit)).all()
+    latest_snapshots = get_latest_prompt_snapshots(db, [prompt.id for prompt in prompts])
+    latest_results = get_latest_scrape_results(db, [prompt.id for prompt in prompts])
     items: list[PromptRead] = []
     for prompt in prompts:
-        latest_snapshot = db.scalar(
-            select(PromptMetricSnapshot)
-            .where(PromptMetricSnapshot.prompt_id == prompt.id)
-            .order_by(PromptMetricSnapshot.snapshot_at.desc())
-            .limit(1)
-        )
-        latest_result = db.scalar(
-            select(ScrapeResult).where(ScrapeResult.prompt_id == prompt.id).order_by(ScrapeResult.executed_at.desc()).limit(1)
-        )
+        latest_snapshot = latest_snapshots.get(prompt.id)
+        latest_result = latest_results.get(prompt.id)
         items.append(
             PromptRead(
                 id=prompt.id,
@@ -576,7 +621,7 @@ def get_dashboard(workspace_id: UUID, db: DbSession):
     workspace = get_workspace_or_404(db, workspace_id)
     setting_rows = db.scalars(select(WorkspaceSetting).where(WorkspaceSetting.workspace_id == workspace_id)).all()
     settings_map = {item.key: item.value_json for item in setting_rows}
-    prompts = db.scalars(select(Prompt).where(Prompt.workspace_id == workspace_id)).all()
+    prompts = db.scalars(select(Prompt).options(selectinload(Prompt.category)).where(Prompt.workspace_id == workspace_id)).all()
     snapshots = db.scalars(
         select(PromptMetricSnapshot)
         .where(PromptMetricSnapshot.workspace_id == workspace_id)
@@ -595,11 +640,7 @@ def get_dashboard(workspace_id: UUID, db: DbSession):
         .order_by(CompetitorSnapshot.snapshot_at.asc(), CompetitorSnapshot.brand.asc())
     ).all()
 
-    category_names = {
-        category.id: category.name
-        for category in db.scalars(select(PromptCategory).where(PromptCategory.workspace_id == workspace_id)).all()
-    }
-    prompt_map = {prompt.id: prompt for prompt in prompts}
+    category_names = {prompt.category_id: prompt.category.name for prompt in prompts if prompt.category}
 
     prompt_snapshots: dict[UUID, list[PromptMetricSnapshot]] = {}
     for snapshot in snapshots:
