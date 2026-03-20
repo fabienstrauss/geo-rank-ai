@@ -36,7 +36,9 @@ from schemas import (
     ConnectorRead,
     ConnectorUpdate,
     DashboardRead,
+    RunListRead,
     PromptCreate,
+    PromptListRead,
     PromptRead,
     PromptUpdate,
     PromptCategoryRead,
@@ -150,11 +152,24 @@ def delete_workspace(workspace_id: UUID, db: DbSession):
 @app.get("/workspaces/{workspace_id}/categories", response_model=list[PromptCategoryRead])
 def list_categories(workspace_id: UUID, db: DbSession):
     get_workspace_or_404(db, workspace_id)
-    return db.scalars(
+    categories = db.scalars(
         select(PromptCategory)
         .where(PromptCategory.workspace_id == workspace_id)
         .order_by(PromptCategory.sort_order.asc(), PromptCategory.name.asc())
     ).all()
+    counts = dict(
+        db.execute(
+            select(Prompt.category_id, func.count(Prompt.id))
+            .where(Prompt.workspace_id == workspace_id)
+            .group_by(Prompt.category_id)
+        ).all()
+    )
+    return [
+        PromptCategoryRead.model_validate(category, from_attributes=True).model_copy(
+            update={"prompt_count": counts.get(category.id, 0)}
+        )
+        for category in categories
+    ]
 
 
 @app.post("/workspaces/{workspace_id}/categories", response_model=PromptCategoryRead, status_code=201)
@@ -205,16 +220,20 @@ def delete_category(category_id: UUID, db: DbSession, move_to_category_id: UUID 
     db.commit()
 
 
-@app.get("/workspaces/{workspace_id}/prompts", response_model=list[PromptRead])
+@app.get("/workspaces/{workspace_id}/prompts", response_model=PromptListRead)
 def list_prompts(
     workspace_id: UUID,
     db: DbSession,
     category_ids: Annotated[list[UUID] | None, Query()] = None,
     status: str | None = None,
     search: str | None = None,
+    limit: int = Query(default=10, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    sort_by: str = Query(default="created_at"),
+    sort_order: str = Query(default="desc"),
 ):
     get_workspace_or_404(db, workspace_id)
-    query = select(Prompt).where(Prompt.workspace_id == workspace_id).order_by(Prompt.created_at.desc())
+    query = select(Prompt).where(Prompt.workspace_id == workspace_id)
     if category_ids:
         query = query.where(Prompt.category_id.in_(category_ids))
     if status:
@@ -228,7 +247,17 @@ def list_prompts(
                 func.lower(func.coalesce(cast(Prompt.selected_models, String), "")).like(normalized),
             )
         )
-    prompts = db.scalars(query).all()
+    sort_columns = {
+        "created_at": Prompt.created_at,
+        "updated_at": Prompt.updated_at,
+        "prompt_text": Prompt.prompt_text,
+        "status": Prompt.status,
+    }
+    sort_column = sort_columns.get(sort_by, Prompt.created_at)
+    query = query.order_by(sort_column.asc() if sort_order == "asc" else sort_column.desc())
+
+    total = db.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
+    prompts = db.scalars(query.offset(offset).limit(limit)).all()
     items: list[PromptRead] = []
     for prompt in prompts:
         latest_snapshot = db.scalar(
@@ -259,7 +288,7 @@ def list_prompts(
                 last_run_at=latest_result.executed_at if latest_result else None,
             )
         )
-    return items
+    return PromptListRead(items=items, total=total, limit=limit, offset=offset)
 
 
 @app.post("/workspaces/{workspace_id}/prompts", response_model=PromptRead, status_code=201)
@@ -309,16 +338,20 @@ def delete_prompt(prompt_id: UUID, db: DbSession):
     db.commit()
 
 
-@app.get("/workspaces/{workspace_id}/runs", response_model=list[RunSummaryRead])
+@app.get("/workspaces/{workspace_id}/runs", response_model=RunListRead)
 def list_runs(
     workspace_id: UUID,
     db: DbSession,
     statuses: Annotated[list[str] | None, Query()] = None,
     run_types: Annotated[list[str] | None, Query()] = None,
     search: str | None = None,
+    limit: int = Query(default=10, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    sort_by: str = Query(default="created_at"),
+    sort_order: str = Query(default="desc"),
 ):
     get_workspace_or_404(db, workspace_id)
-    query = select(Run).where(Run.workspace_id == workspace_id).order_by(Run.created_at.desc())
+    query = select(Run).where(Run.workspace_id == workspace_id)
     if statuses:
         query = query.where(Run.status.in_(statuses))
     if run_types:
@@ -332,7 +365,20 @@ def list_runs(
                 func.lower(func.coalesce(cast(Run.selected_models, String), "")).like(normalized),
             )
         )
-    return db.scalars(query).all()
+    sort_columns = {
+        "created_at": Run.created_at,
+        "started_at": Run.started_at,
+        "completed_at": Run.completed_at,
+        "status": Run.status,
+        "run_type": Run.run_type,
+        "visibility_delta": Run.visibility_delta,
+    }
+    sort_column = sort_columns.get(sort_by, Run.created_at)
+    query = query.order_by(sort_column.asc() if sort_order == "asc" else sort_column.desc(), Run.created_at.desc())
+
+    total = db.scalar(select(func.count()).select_from(query.order_by(None).subquery())) or 0
+    items = db.scalars(query.offset(offset).limit(limit)).all()
+    return RunListRead(items=items, total=total, limit=limit, offset=offset)
 
 
 @app.get("/runs/{run_id}", response_model=RunDetailRead)

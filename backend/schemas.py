@@ -103,6 +103,7 @@ class PromptCategoryRead(BaseModel):
     name: str
     sort_order: int
     is_active: bool
+    prompt_count: int | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -127,6 +128,13 @@ class PromptRead(BaseModel):
     last_run_at: datetime | None = None
 
 
+class PromptListRead(BaseModel):
+    items: list[PromptRead]
+    total: int
+    limit: int
+    offset: int
+
+
 class RunSummaryRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -145,6 +153,13 @@ class RunSummaryRead(BaseModel):
     visibility_delta: float | None
     created_at: datetime
     updated_at: datetime
+
+
+class RunListRead(BaseModel):
+    items: list[RunSummaryRead]
+    total: int
+    limit: int
+    offset: int
 
 
 class RunStepEventRead(BaseModel):

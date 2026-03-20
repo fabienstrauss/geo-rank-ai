@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { startTransition, useEffect, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -28,7 +28,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { ConnectorIncident, QueueJob, Run, RunDetail, Worker, getConnectorIncidents, getQueueJobs, getRunDetail, getRunsFiltered, getWorkers } from "@/lib/api";
+import { ConnectorIncident, QueueJob, Run, RunDetail, RunList, Worker, getConnectorIncidents, getQueueJobs, getRunDetail, getRunsFiltered, getWorkers } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const columnSeparatorClass = "border-r border-border/60";
@@ -64,10 +64,15 @@ function formatDuration(seconds?: number | null) {
 
 export function RunsManager() {
   const { activeWorkspace } = useWorkspace();
+  const pageSize = 10;
+  const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [selectedStatuses, setSelectedStatuses] = useState<string[]>([]);
   const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [runPage, setRunPage] = useState<RunList>({ items: [], total: 0, limit: pageSize, offset: 0 });
+  const [sortBy, setSortBy] = useState<"created_at" | "started_at" | "completed_at" | "status" | "run_type" | "visibility_delta">("created_at");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [queueJobs, setQueueJobs] = useState<QueueJob[]>([]);
   const [failures, setFailures] = useState<ConnectorIncident[]>([]);
@@ -77,24 +82,33 @@ export function RunsManager() {
   useEffect(() => {
     async function load() {
       if (!activeWorkspace) return;
+      const requestOffset = workspaceId === activeWorkspace.id ? runPage.offset : 0;
       const [runRows, workerRows, queueRows, incidentRows] = await Promise.all([
         getRunsFiltered(activeWorkspace.id, {
           statuses: selectedStatuses,
           runTypes: selectedTypes,
           search: query,
+          limit: pageSize,
+          offset: requestOffset,
+          sortBy,
+          sortOrder,
         }),
         getWorkers(),
         getQueueJobs(activeWorkspace.id),
         getConnectorIncidents(activeWorkspace.id),
       ]);
-      setRuns(runRows);
-      setWorkers(workerRows);
-      setQueueJobs(queueRows);
-      setFailures(incidentRows);
+      startTransition(() => {
+        setWorkspaceId(activeWorkspace.id);
+        setRuns(runRows.items);
+        setRunPage(runRows);
+        setWorkers(workerRows);
+        setQueueJobs(queueRows);
+        setFailures(incidentRows);
+      });
     }
 
     void load();
-  }, [activeWorkspace, query, selectedStatuses, selectedTypes]);
+  }, [activeWorkspace, pageSize, query, runPage.offset, selectedStatuses, selectedTypes, sortBy, sortOrder, workspaceId]);
 
   useEffect(() => {
     if (!selectedRunId) return;
@@ -102,7 +116,7 @@ export function RunsManager() {
   }, [selectedRunId]);
 
   const kpis = {
-    total: runs.length,
+    total: runPage.total,
     running: runs.filter((run) => run.status === "running").length,
     failed: runs.filter((run) => run.status === "failed").length,
     avgDelta:
@@ -150,12 +164,25 @@ export function RunsManager() {
                 <DropdownMenuContent align="start" className="w-[240px]">
                   <DropdownMenuLabel>Filter Status</DropdownMenuLabel>
                   <DropdownMenuSeparator />
-                  <DropdownMenuCheckboxItem checked={selectedStatuses.length === 0} onCheckedChange={() => setSelectedStatuses([])}>
+                  <DropdownMenuCheckboxItem
+                    checked={selectedStatuses.length === 0}
+                    onCheckedChange={() => {
+                      setRunPage((current) => ({ ...current, offset: 0 }));
+                      setSelectedStatuses([]);
+                    }}
+                  >
                     All Statuses
                   </DropdownMenuCheckboxItem>
                   <DropdownMenuSeparator />
                   {statusOptions.map((status) => (
-                    <DropdownMenuCheckboxItem key={status} checked={selectedStatuses.includes(status)} onCheckedChange={() => setSelectedStatuses((current) => current.includes(status) ? current.filter((item) => item !== status) : [...current, status])}>
+                    <DropdownMenuCheckboxItem
+                      key={status}
+                      checked={selectedStatuses.includes(status)}
+                      onCheckedChange={() => {
+                        setRunPage((current) => ({ ...current, offset: 0 }));
+                        setSelectedStatuses((current) => (current.includes(status) ? current.filter((item) => item !== status) : [...current, status]));
+                      }}
+                    >
                       {titleize(status)}
                     </DropdownMenuCheckboxItem>
                   ))}
@@ -169,22 +196,65 @@ export function RunsManager() {
                 <DropdownMenuContent align="start" className="w-[240px]">
                   <DropdownMenuLabel>Filter Run Type</DropdownMenuLabel>
                   <DropdownMenuSeparator />
-                  <DropdownMenuCheckboxItem checked={selectedTypes.length === 0} onCheckedChange={() => setSelectedTypes([])}>
+                  <DropdownMenuCheckboxItem
+                    checked={selectedTypes.length === 0}
+                    onCheckedChange={() => {
+                      setRunPage((current) => ({ ...current, offset: 0 }));
+                      setSelectedTypes([]);
+                    }}
+                  >
                     All Run Types
                   </DropdownMenuCheckboxItem>
                   <DropdownMenuSeparator />
                   {typeOptions.map((type) => (
-                    <DropdownMenuCheckboxItem key={type} checked={selectedTypes.includes(type)} onCheckedChange={() => setSelectedTypes((current) => current.includes(type) ? current.filter((item) => item !== type) : [...current, type])}>
+                    <DropdownMenuCheckboxItem
+                      key={type}
+                      checked={selectedTypes.includes(type)}
+                      onCheckedChange={() => {
+                        setRunPage((current) => ({ ...current, offset: 0 }));
+                        setSelectedTypes((current) => (current.includes(type) ? current.filter((item) => item !== type) : [...current, type]));
+                      }}
+                    >
                       {titleize(type)}
                     </DropdownMenuCheckboxItem>
                   ))}
                 </DropdownMenuContent>
               </DropdownMenu>
+
+              <select
+                value={`${sortBy}:${sortOrder}`}
+                onChange={(event) => {
+                  const [nextSortBy, nextSortOrder] = event.target.value.split(":") as [
+                    "created_at" | "started_at" | "completed_at" | "status" | "run_type" | "visibility_delta",
+                    "asc" | "desc",
+                  ];
+                  setRunPage((current) => ({ ...current, offset: 0 }));
+                  setSortBy(nextSortBy);
+                  setSortOrder(nextSortOrder);
+                }}
+                className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+              >
+                <option value="created_at:desc">Newest first</option>
+                <option value="created_at:asc">Oldest first</option>
+                <option value="started_at:desc">Started recently</option>
+                <option value="completed_at:desc">Completed recently</option>
+                <option value="status:asc">Status A-Z</option>
+                <option value="run_type:asc">Type A-Z</option>
+                <option value="visibility_delta:desc">Highest visibility delta</option>
+              </select>
             </div>
 
             <div className="relative w-full xl:max-w-sm">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search run id, scope, or model" className="pl-9" />
+              <Input
+                value={query}
+                onChange={(event) => {
+                  setRunPage((current) => ({ ...current, offset: 0 }));
+                  setQuery(event.target.value);
+                }}
+                placeholder="Search run id, scope, or model"
+                className="pl-9"
+              />
             </div>
           </div>
         </CardHeader>
@@ -259,6 +329,31 @@ export function RunsManager() {
           )}
         </CardContent>
       </Card>
+      {hasRunsData ? (
+        <div className="flex items-center justify-between text-sm text-muted-foreground">
+          <p>
+            Showing {runPage.offset + 1}-{Math.min(runPage.offset + runs.length, runPage.total)} of {runPage.total}
+          </p>
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={runPage.offset === 0}
+              onClick={() => setRunPage((current) => ({ ...current, offset: Math.max(current.offset - current.limit, 0) }))}
+            >
+              Previous
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={runPage.offset + runPage.limit >= runPage.total}
+              onClick={() => setRunPage((current) => ({ ...current, offset: current.offset + current.limit }))}
+            >
+              Next
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
       <div className="grid gap-4 xl:grid-cols-[1.5fr_1fr]">
         <Card>
