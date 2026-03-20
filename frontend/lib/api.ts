@@ -32,6 +32,18 @@ export type Prompt = {
   last_run_at?: string | null;
 };
 
+export type PromptList = {
+  items: Prompt[];
+  total: number;
+  limit: number;
+  offset: number;
+  summary: {
+    total: number;
+    visible_categories: number;
+    avg_visibility?: number | null;
+  };
+};
+
 export type Run = {
   id: string;
   workspace_id: string;
@@ -46,6 +58,20 @@ export type Run = {
   prompt_count: number;
   mentions_count: number;
   visibility_delta?: number | null;
+};
+
+export type RunList = {
+  items: Run[];
+  total: number;
+  limit: number;
+  offset: number;
+  summary: {
+    total: number;
+    running: number;
+    failed: number;
+    avg_visibility_delta?: number | null;
+    last_completed_at?: string | null;
+  };
 };
 
 export type RunDetail = Run & {
@@ -222,24 +248,28 @@ export async function deleteCategory(categoryId: string, moveToCategoryId?: stri
   return api<void>(`/categories/${categoryId}${query}`, { method: "DELETE" });
 }
 
-export async function getPrompts(workspaceId: string) {
-  return api<Prompt[]>(`/workspaces/${workspaceId}/prompts`);
-}
-
 export async function getPromptsFiltered(
   workspaceId: string,
   params?: {
     categoryIds?: string[];
     status?: PromptStatus;
     search?: string;
+    limit?: number;
+    offset?: number;
+    sortBy?: "created_at" | "updated_at" | "prompt_text" | "status";
+    sortOrder?: "asc" | "desc";
   }
 ) {
   const query = new URLSearchParams();
   params?.categoryIds?.forEach((categoryId) => query.append("category_ids", categoryId));
   if (params?.status) query.set("status", params.status);
   if (params?.search?.trim()) query.set("search", params.search.trim());
+  if (params?.limit) query.set("limit", String(params.limit));
+  if (params?.offset) query.set("offset", String(params.offset));
+  if (params?.sortBy) query.set("sort_by", params.sortBy);
+  if (params?.sortOrder) query.set("sort_order", params.sortOrder);
   const suffix = query.toString() ? `?${query.toString()}` : "";
-  return api<Prompt[]>(`/workspaces/${workspaceId}/prompts${suffix}`);
+  return api<PromptList>(`/workspaces/${workspaceId}/prompts${suffix}`);
 }
 
 export async function createPrompt(
@@ -275,7 +305,7 @@ export async function deletePrompt(promptId: string) {
 }
 
 export async function getRuns(workspaceId: string) {
-  return api<Run[]>(`/workspaces/${workspaceId}/runs`);
+  return api<RunList>(`/workspaces/${workspaceId}/runs`);
 }
 
 export async function getRunsFiltered(
@@ -284,14 +314,22 @@ export async function getRunsFiltered(
     statuses?: string[];
     runTypes?: string[];
     search?: string;
+    limit?: number;
+    offset?: number;
+    sortBy?: "created_at" | "started_at" | "completed_at" | "status" | "run_type" | "visibility_delta";
+    sortOrder?: "asc" | "desc";
   }
 ) {
   const query = new URLSearchParams();
   params?.statuses?.forEach((status) => query.append("statuses", status));
   params?.runTypes?.forEach((type) => query.append("run_types", type));
   if (params?.search?.trim()) query.set("search", params.search.trim());
+  if (params?.limit) query.set("limit", String(params.limit));
+  if (params?.offset) query.set("offset", String(params.offset));
+  if (params?.sortBy) query.set("sort_by", params.sortBy);
+  if (params?.sortOrder) query.set("sort_order", params.sortOrder);
   const suffix = query.toString() ? `?${query.toString()}` : "";
-  return api<Run[]>(`/workspaces/${workspaceId}/runs${suffix}`);
+  return api<RunList>(`/workspaces/${workspaceId}/runs${suffix}`);
 }
 
 export async function getRunDetail(runId: string) {

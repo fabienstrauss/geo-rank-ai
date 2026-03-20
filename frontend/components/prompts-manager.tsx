@@ -19,6 +19,7 @@ import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
   Prompt,
+  PromptList,
   PromptCategory,
   PromptStatus,
   createCategory,
@@ -329,13 +330,24 @@ function PromptModal({
 
 export function PromptsManager() {
   const { activeWorkspace } = useWorkspace();
+  const pageSize = 10;
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [trackedBrand, setTrackedBrand] = useState("GeoRank AI");
   const [defaultModels, setDefaultModels] = useState<ModelOption[]>(["GPT-5", "Claude"]);
   const [categories, setCategories] = useState<PromptCategory[]>([]);
   const [prompts, setPrompts] = useState<Prompt[]>([]);
+  const [promptPage, setPromptPage] = useState<PromptList>({
+    items: [],
+    total: 0,
+    limit: pageSize,
+    offset: 0,
+    summary: { total: 0, visible_categories: 0, avg_visibility: null },
+  });
   const [query, setQuery] = useState("");
   const [selectedCategoryIds, setSelectedCategoryIds] = useState<string[]>([]);
+  const [selectedStatus, setSelectedStatus] = useState<PromptStatus | "all">("all");
+  const [sortBy, setSortBy] = useState<"created_at" | "updated_at" | "prompt_text" | "status">("created_at");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState<"create" | "edit">("create");
@@ -345,11 +357,17 @@ export function PromptsManager() {
 
   const load = useCallback(async () => {
     if (!activeWorkspace) return;
+    const requestOffset = workspaceId === activeWorkspace.id ? promptPage.offset : 0;
     const [categoryRows, promptRows, settings] = await Promise.all([
       getCategories(activeWorkspace.id),
       getPromptsFiltered(activeWorkspace.id, {
         categoryIds: selectedCategoryIds,
+        status: selectedStatus === "all" ? undefined : selectedStatus,
         search: query,
+        limit: pageSize,
+        offset: requestOffset,
+        sortBy,
+        sortOrder,
       }),
       getSettings(activeWorkspace.id),
     ]);
@@ -360,10 +378,11 @@ export function PromptsManager() {
       setTrackedBrand((profileSetting?.value_json.tracked_brand as string | undefined) ?? "GeoRank AI");
       setDefaultModels(((modelsSetting?.value_json.models as ModelOption[] | undefined) ?? ["GPT-5", "Claude"]));
       setCategories(categoryRows);
-      setPrompts(promptRows);
+      setPrompts(promptRows.items);
+      setPromptPage(promptRows);
       setForm((current) => ({ ...current, categoryId: current.categoryId || categoryRows[0]?.id || "" }));
     });
-  }, [activeWorkspace, query, selectedCategoryIds]);
+  }, [activeWorkspace, pageSize, promptPage.offset, query, selectedCategoryIds, selectedStatus, sortBy, sortOrder, workspaceId]);
 
   useEffect(() => {
     void load();
@@ -380,21 +399,17 @@ export function PromptsManager() {
 
   const promptCounts = useMemo(() => {
     return categories.reduce<Record<string, number>>((acc, category) => {
-      acc[category.id] = prompts.filter((prompt) => prompt.category_id === category.id).length;
+      acc[category.id] = category.prompt_count ?? 0;
       return acc;
     }, {});
-  }, [categories, prompts]);
+  }, [categories]);
 
-  const avgVisibility =
-    prompts.length > 0
-      ? Math.round(prompts.reduce((sum, prompt) => sum + (prompt.visibility ?? 0), 0) / prompts.length)
-      : 0;
+  const avgVisibility = Math.round(promptPage.summary?.avg_visibility ?? 0);
   const hasPromptData = categories.length > 0 && prompts.length > 0;
 
   const toggleCategoryFilter = (categoryId: string) => {
-    setSelectedCategoryIds((current) =>
-      current.includes(categoryId) ? current.filter((item) => item !== categoryId) : [...current, categoryId]
-    );
+    setPromptPage((current) => ({ ...current, offset: 0 }));
+    setSelectedCategoryIds((current) => (current.includes(categoryId) ? current.filter((item) => item !== categoryId) : [...current, categoryId]));
   };
 
   const openCreateModal = () => {
@@ -466,11 +481,11 @@ export function PromptsManager() {
         <CardContent className="grid gap-3 sm:grid-cols-3">
           <div className="rounded-xl border bg-muted/20 p-4">
             <p className="text-xs uppercase tracking-[0.22em] text-muted-foreground">Tracked Prompts</p>
-            <p className="mt-2 text-2xl font-semibold">{prompts.length}</p>
+            <p className="mt-2 text-2xl font-semibold">{promptPage.total}</p>
           </div>
           <div className="rounded-xl border bg-muted/20 p-4">
             <p className="text-xs uppercase tracking-[0.22em] text-muted-foreground">Visible Categories</p>
-            <p className="mt-2 text-2xl font-semibold">{groupedPrompts.length}</p>
+            <p className="mt-2 text-2xl font-semibold">{promptPage.summary?.visible_categories ?? 0}</p>
           </div>
           <div className="rounded-xl border bg-muted/20 p-4">
             <p className="text-xs uppercase tracking-[0.22em] text-muted-foreground">Avg Visibility</p>
@@ -492,7 +507,13 @@ export function PromptsManager() {
                 <DropdownMenuContent align="start" className="w-[280px]">
                   <DropdownMenuLabel>Filter Categories</DropdownMenuLabel>
                   <DropdownMenuSeparator />
-                  <DropdownMenuCheckboxItem checked={selectedCategoryIds.length === 0} onCheckedChange={() => setSelectedCategoryIds([])}>
+                  <DropdownMenuCheckboxItem
+                    checked={selectedCategoryIds.length === 0}
+                    onCheckedChange={() => {
+                      setPromptPage((current) => ({ ...current, offset: 0 }));
+                      setSelectedCategoryIds([]);
+                    }}
+                  >
                     All Categories
                   </DropdownMenuCheckboxItem>
                   <DropdownMenuSeparator />
@@ -512,11 +533,52 @@ export function PromptsManager() {
                 <FolderPen className="h-4 w-4" />
                 Manage Categories
               </Button>
+
+              <select
+                value={selectedStatus}
+                onChange={(event) => {
+                  setPromptPage((current) => ({ ...current, offset: 0 }));
+                  setSelectedStatus(event.target.value as PromptStatus | "all");
+                }}
+                className={selectClassName}
+              >
+                <option value="all">All Statuses</option>
+                <option value="active">Active</option>
+                <option value="draft">Draft</option>
+              </select>
+
+              <select
+                value={`${sortBy}:${sortOrder}`}
+                onChange={(event) => {
+                  const [nextSortBy, nextSortOrder] = event.target.value.split(":") as [
+                    "created_at" | "updated_at" | "prompt_text" | "status",
+                    "asc" | "desc",
+                  ];
+                  setPromptPage((current) => ({ ...current, offset: 0 }));
+                  setSortBy(nextSortBy);
+                  setSortOrder(nextSortOrder);
+                }}
+                className={selectClassName}
+              >
+                <option value="created_at:desc">Newest first</option>
+                <option value="created_at:asc">Oldest first</option>
+                <option value="updated_at:desc">Recently updated</option>
+                <option value="prompt_text:asc">Prompt A-Z</option>
+                <option value="status:asc">Status A-Z</option>
+              </select>
             </div>
 
             <div className="relative w-full xl:max-w-sm">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search prompts, categories, or models" className="pl-9" />
+              <Input
+                value={query}
+                onChange={(event) => {
+                  setPromptPage((current) => ({ ...current, offset: 0 }));
+                  setQuery(event.target.value);
+                }}
+                placeholder="Search prompts, categories, or models"
+                className="pl-9"
+              />
             </div>
           </div>
         </CardHeader>
@@ -628,6 +690,35 @@ export function PromptsManager() {
             </div>
           )}
         </CardContent>
+        {hasPromptData ? (
+          <div className="flex items-center justify-between border-t px-6 py-4 text-sm text-muted-foreground">
+            <p>
+              Showing {promptPage.offset + 1}-{Math.min(promptPage.offset + prompts.length, promptPage.total)} of {promptPage.total}
+            </p>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={promptPage.offset === 0}
+                onClick={() =>
+                  setPromptPage((current) => ({ ...current, offset: Math.max(current.offset - current.limit, 0) }))
+                }
+              >
+                Previous
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={promptPage.offset + promptPage.limit >= promptPage.total}
+                onClick={() =>
+                  setPromptPage((current) => ({ ...current, offset: current.offset + current.limit }))
+                }
+              >
+                Next
+              </Button>
+            </div>
+          </div>
+        ) : null}
       </Card>
 
       <PromptModal

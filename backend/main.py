@@ -5,7 +5,7 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import cast, func, or_, select, String
+from sqlalchemy import and_, cast, func, or_, select, String
 from sqlalchemy.orm import Session, selectinload
 
 from config import get_settings
@@ -20,6 +20,7 @@ from models import (
     ProviderCredential,
     QueueJob,
     Run,
+    RunStatus,
     ScrapeResult,
     SourceCitation,
     Workspace,
@@ -36,7 +37,11 @@ from schemas import (
     ConnectorRead,
     ConnectorUpdate,
     DashboardRead,
+    PromptListSummaryRead,
+    RunListRead,
+    RunListSummaryRead,
     PromptCreate,
+    PromptListRead,
     PromptRead,
     PromptUpdate,
     PromptCategoryRead,
@@ -99,6 +104,133 @@ def get_run_or_404(db: Session, run_id: UUID) -> Run:
     return run
 
 
+def get_latest_prompt_snapshots(db: Session, prompt_ids: list[UUID]) -> dict[UUID, PromptMetricSnapshot]:
+    if not prompt_ids:
+        return {}
+
+    latest_snapshot_subquery = (
+        select(
+            PromptMetricSnapshot.prompt_id.label("prompt_id"),
+            func.max(PromptMetricSnapshot.snapshot_at).label("snapshot_at"),
+        )
+        .where(PromptMetricSnapshot.prompt_id.in_(prompt_ids))
+        .group_by(PromptMetricSnapshot.prompt_id)
+        .subquery()
+    )
+    snapshots = db.scalars(
+        select(PromptMetricSnapshot).join(
+            latest_snapshot_subquery,
+            and_(
+                PromptMetricSnapshot.prompt_id == latest_snapshot_subquery.c.prompt_id,
+                PromptMetricSnapshot.snapshot_at == latest_snapshot_subquery.c.snapshot_at,
+            ),
+        )
+    ).all()
+    return {snapshot.prompt_id: snapshot for snapshot in snapshots if snapshot.prompt_id}
+
+
+def get_latest_scrape_results(db: Session, prompt_ids: list[UUID]) -> dict[UUID, ScrapeResult]:
+    if not prompt_ids:
+        return {}
+
+    latest_result_subquery = (
+        select(
+            ScrapeResult.prompt_id.label("prompt_id"),
+            func.max(ScrapeResult.executed_at).label("executed_at"),
+        )
+        .where(ScrapeResult.prompt_id.in_(prompt_ids))
+        .group_by(ScrapeResult.prompt_id)
+        .subquery()
+    )
+    results = db.scalars(
+        select(ScrapeResult).join(
+            latest_result_subquery,
+            and_(
+                ScrapeResult.prompt_id == latest_result_subquery.c.prompt_id,
+                ScrapeResult.executed_at == latest_result_subquery.c.executed_at,
+            ),
+        )
+    ).all()
+    return {result.prompt_id: result for result in results}
+
+
+def get_prompt_list_summary(db: Session, base_query):
+    filtered_prompts = base_query.subquery()
+    latest_snapshot_subquery = (
+        select(
+            PromptMetricSnapshot.prompt_id.label("prompt_id"),
+            func.max(PromptMetricSnapshot.snapshot_at).label("snapshot_at"),
+        )
+        .join(filtered_prompts, PromptMetricSnapshot.prompt_id == filtered_prompts.c.id)
+        .group_by(PromptMetricSnapshot.prompt_id)
+        .subquery()
+    )
+    return db.execute(
+        select(
+            func.count(func.distinct(filtered_prompts.c.id)).label("total"),
+            func.count(func.distinct(filtered_prompts.c.category_id)).label("visible_categories"),
+            func.avg(PromptMetricSnapshot.visibility_score).label("avg_visibility"),
+        ).select_from(
+            filtered_prompts.outerjoin(
+                latest_snapshot_subquery,
+                filtered_prompts.c.id == latest_snapshot_subquery.c.prompt_id,
+            ).outerjoin(
+                PromptMetricSnapshot,
+                and_(
+                    PromptMetricSnapshot.prompt_id == latest_snapshot_subquery.c.prompt_id,
+                    PromptMetricSnapshot.snapshot_at == latest_snapshot_subquery.c.snapshot_at,
+                ),
+            )
+        )
+    ).one()
+
+
+def build_prompt_base_query(
+    workspace_id: UUID,
+    category_ids: list[UUID] | None = None,
+    status: str | None = None,
+    search: str | None = None,
+):
+    query = select(Prompt).where(Prompt.workspace_id == workspace_id)
+    if category_ids:
+        query = query.where(Prompt.category_id.in_(category_ids))
+    if status:
+        query = query.where(Prompt.status == status)
+    if search:
+        normalized = f"%{search.strip().lower()}%"
+        query = query.where(
+            or_(
+                func.lower(Prompt.prompt_text).like(normalized),
+                func.lower(Prompt.target_brand).like(normalized),
+                func.lower(func.coalesce(cast(Prompt.selected_models, String), "")).like(normalized),
+            )
+        )
+    return query
+
+
+def build_run_base_query(
+    workspace_id: UUID,
+    statuses: list[str] | None = None,
+    run_types: list[str] | None = None,
+    search: str | None = None,
+):
+    query = select(Run).where(Run.workspace_id == workspace_id)
+    if statuses:
+        query = query.where(Run.status.in_(statuses))
+    if run_types:
+        query = query.where(Run.run_type.in_(run_types))
+    if search:
+        normalized = f"%{search.strip().lower()}%"
+        query = query.where(
+            or_(
+                cast(Run.id, String).ilike(normalized),
+                func.lower(func.coalesce(Run.scope_description, "")).like(normalized),
+                func.lower(func.coalesce(cast(Run.selected_models, String), "")).like(normalized),
+            )
+        )
+    return query
+
+
 @app.get("/")
 def read_root():
     return {
@@ -150,11 +282,24 @@ def delete_workspace(workspace_id: UUID, db: DbSession):
 @app.get("/workspaces/{workspace_id}/categories", response_model=list[PromptCategoryRead])
 def list_categories(workspace_id: UUID, db: DbSession):
     get_workspace_or_404(db, workspace_id)
-    return db.scalars(
+    categories = db.scalars(
         select(PromptCategory)
         .where(PromptCategory.workspace_id == workspace_id)
         .order_by(PromptCategory.sort_order.asc(), PromptCategory.name.asc())
     ).all()
+    counts = dict(
+        db.execute(
+            select(Prompt.category_id, func.count(Prompt.id))
+            .where(Prompt.workspace_id == workspace_id)
+            .group_by(Prompt.category_id)
+        ).all()
+    )
+    return [
+        PromptCategoryRead.model_validate(category, from_attributes=True).model_copy(
+            update={"prompt_count": counts.get(category.id, 0)}
+        )
+        for category in categories
+    ]
 
 
 @app.post("/workspaces/{workspace_id}/categories", response_model=PromptCategoryRead, status_code=201)
@@ -205,41 +350,44 @@ def delete_category(category_id: UUID, db: DbSession, move_to_category_id: UUID 
     db.commit()
 
 
-@app.get("/workspaces/{workspace_id}/prompts", response_model=list[PromptRead])
+@app.get("/workspaces/{workspace_id}/prompts", response_model=PromptListRead)
 def list_prompts(
     workspace_id: UUID,
     db: DbSession,
     category_ids: Annotated[list[UUID] | None, Query()] = None,
     status: str | None = None,
     search: str | None = None,
+    limit: int = Query(default=10, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    sort_by: str = Query(default="created_at"),
+    sort_order: str = Query(default="desc"),
 ):
     get_workspace_or_404(db, workspace_id)
-    query = select(Prompt).where(Prompt.workspace_id == workspace_id).order_by(Prompt.created_at.desc())
-    if category_ids:
-        query = query.where(Prompt.category_id.in_(category_ids))
-    if status:
-        query = query.where(Prompt.status == status)
-    if search:
-        normalized = f"%{search.strip().lower()}%"
-        query = query.where(
-            or_(
-                func.lower(Prompt.prompt_text).like(normalized),
-                func.lower(Prompt.target_brand).like(normalized),
-                func.lower(func.coalesce(cast(Prompt.selected_models, String), "")).like(normalized),
-            )
-        )
-    prompts = db.scalars(query).all()
+    base_query = build_prompt_base_query(
+        workspace_id=workspace_id,
+        category_ids=category_ids,
+        status=status,
+        search=search,
+    )
+    query = base_query.options(selectinload(Prompt.category))
+    sort_columns = {
+        "created_at": Prompt.created_at,
+        "updated_at": Prompt.updated_at,
+        "prompt_text": Prompt.prompt_text,
+        "status": Prompt.status,
+    }
+    sort_column = sort_columns.get(sort_by, Prompt.created_at)
+    query = query.order_by(sort_column.asc() if sort_order == "asc" else sort_column.desc())
+
+    summary_row = get_prompt_list_summary(db, base_query)
+    total = int(summary_row.total or 0)
+    prompts = db.scalars(query.offset(offset).limit(limit)).all()
+    latest_snapshots = get_latest_prompt_snapshots(db, [prompt.id for prompt in prompts])
+    latest_results = get_latest_scrape_results(db, [prompt.id for prompt in prompts])
     items: list[PromptRead] = []
     for prompt in prompts:
-        latest_snapshot = db.scalar(
-            select(PromptMetricSnapshot)
-            .where(PromptMetricSnapshot.prompt_id == prompt.id)
-            .order_by(PromptMetricSnapshot.snapshot_at.desc())
-            .limit(1)
-        )
-        latest_result = db.scalar(
-            select(ScrapeResult).where(ScrapeResult.prompt_id == prompt.id).order_by(ScrapeResult.executed_at.desc()).limit(1)
-        )
+        latest_snapshot = latest_snapshots.get(prompt.id)
+        latest_result = latest_results.get(prompt.id)
         items.append(
             PromptRead(
                 id=prompt.id,
@@ -259,7 +407,17 @@ def list_prompts(
                 last_run_at=latest_result.executed_at if latest_result else None,
             )
         )
-    return items
+    return PromptListRead(
+        items=items,
+        total=total,
+        limit=limit,
+        offset=offset,
+        summary=PromptListSummaryRead(
+            total=total,
+            visible_categories=int(summary_row.visible_categories or 0),
+            avg_visibility=round(float(summary_row.avg_visibility), 1) if summary_row.avg_visibility is not None else None,
+        ),
+    )
 
 
 @app.post("/workspaces/{workspace_id}/prompts", response_model=PromptRead, status_code=201)
@@ -309,30 +467,61 @@ def delete_prompt(prompt_id: UUID, db: DbSession):
     db.commit()
 
 
-@app.get("/workspaces/{workspace_id}/runs", response_model=list[RunSummaryRead])
+@app.get("/workspaces/{workspace_id}/runs", response_model=RunListRead)
 def list_runs(
     workspace_id: UUID,
     db: DbSession,
     statuses: Annotated[list[str] | None, Query()] = None,
     run_types: Annotated[list[str] | None, Query()] = None,
     search: str | None = None,
+    limit: int = Query(default=10, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    sort_by: str = Query(default="created_at"),
+    sort_order: str = Query(default="desc"),
 ):
     get_workspace_or_404(db, workspace_id)
-    query = select(Run).where(Run.workspace_id == workspace_id).order_by(Run.created_at.desc())
-    if statuses:
-        query = query.where(Run.status.in_(statuses))
-    if run_types:
-        query = query.where(Run.run_type.in_(run_types))
-    if search:
-        normalized = f"%{search.strip().lower()}%"
-        query = query.where(
-            or_(
-                cast(Run.id, String).ilike(normalized),
-                func.lower(func.coalesce(Run.scope_description, "")).like(normalized),
-                func.lower(func.coalesce(cast(Run.selected_models, String), "")).like(normalized),
-            )
+    query = build_run_base_query(
+        workspace_id=workspace_id,
+        statuses=statuses,
+        run_types=run_types,
+        search=search,
+    )
+    sort_columns = {
+        "created_at": Run.created_at,
+        "started_at": Run.started_at,
+        "completed_at": Run.completed_at,
+        "status": Run.status,
+        "run_type": Run.run_type,
+        "visibility_delta": Run.visibility_delta,
+    }
+    sort_column = sort_columns.get(sort_by, Run.created_at)
+    query = query.order_by(sort_column.asc() if sort_order == "asc" else sort_column.desc(), Run.created_at.desc())
+
+    filtered_runs = query.order_by(None).subquery()
+    summary_row = db.execute(
+        select(
+            func.count().label("total"),
+            func.count().filter(filtered_runs.c.status == RunStatus.RUNNING).label("running"),
+            func.count().filter(filtered_runs.c.status == RunStatus.FAILED).label("failed"),
+            func.avg(filtered_runs.c.visibility_delta).label("avg_visibility_delta"),
+            func.max(filtered_runs.c.completed_at).label("last_completed_at"),
         )
-    return db.scalars(query).all()
+    ).one()
+    total = int(summary_row.total or 0)
+    items = db.scalars(query.offset(offset).limit(limit)).all()
+    return RunListRead(
+        items=items,
+        total=total,
+        limit=limit,
+        offset=offset,
+        summary=RunListSummaryRead(
+            total=total,
+            running=int(summary_row.running or 0),
+            failed=int(summary_row.failed or 0),
+            avg_visibility_delta=round(float(summary_row.avg_visibility_delta), 1) if summary_row.avg_visibility_delta is not None else None,
+            last_completed_at=summary_row.last_completed_at,
+        ),
+    )
 
 
 @app.get("/runs/{run_id}", response_model=RunDetailRead)
@@ -530,7 +719,7 @@ def get_dashboard(workspace_id: UUID, db: DbSession):
     workspace = get_workspace_or_404(db, workspace_id)
     setting_rows = db.scalars(select(WorkspaceSetting).where(WorkspaceSetting.workspace_id == workspace_id)).all()
     settings_map = {item.key: item.value_json for item in setting_rows}
-    prompts = db.scalars(select(Prompt).where(Prompt.workspace_id == workspace_id)).all()
+    prompts = db.scalars(select(Prompt).options(selectinload(Prompt.category)).where(Prompt.workspace_id == workspace_id)).all()
     snapshots = db.scalars(
         select(PromptMetricSnapshot)
         .where(PromptMetricSnapshot.workspace_id == workspace_id)
@@ -549,11 +738,7 @@ def get_dashboard(workspace_id: UUID, db: DbSession):
         .order_by(CompetitorSnapshot.snapshot_at.asc(), CompetitorSnapshot.brand.asc())
     ).all()
 
-    category_names = {
-        category.id: category.name
-        for category in db.scalars(select(PromptCategory).where(PromptCategory.workspace_id == workspace_id)).all()
-    }
-    prompt_map = {prompt.id: prompt for prompt in prompts}
+    category_names = {prompt.category_id: prompt.category.name for prompt in prompts if prompt.category}
 
     prompt_snapshots: dict[UUID, list[PromptMetricSnapshot]] = {}
     for snapshot in snapshots:
