@@ -34,3 +34,10 @@ def get_scraper_plugin(key: str) -> ScraperPluginDefinition:
         if plugin.key == key:
             return plugin
     raise HTTPException(status_code=404, detail="Scraper plugin not found")
+
+
+def build_scraper_runner(key: str):
+    plugin = get_scraper_plugin(key)
+    if plugin.runner_cls is None:
+        raise HTTPException(status_code=501, detail="Scraper plugin does not provide a runtime implementation")
+    return plugin.runner_cls()

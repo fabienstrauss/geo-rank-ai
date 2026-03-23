@@ -1,15 +1,33 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
-from models import Connector, Prompt, PromptStatus, QueueJob, QueueJobStatus, Run, RunLog, RunPrompt, RunStatus, RunStepEvent, RunType
-from plugins.registry import get_scraper_plugin
-from schemas import ManualRunCreate
+from models import (
+    Connector,
+    Prompt,
+    PromptStatus,
+    ProviderCredential,
+    QueueJob,
+    QueueJobStatus,
+    Run,
+    RunLog,
+    RunPrompt,
+    RunStatus,
+    RunStepEvent,
+    RunType,
+    ScrapeResult,
+    SourceCitation,
+)
+from plugins.base import CitationResult, ScraperInput
+from plugins.registry import build_scraper_runner, get_scraper_plugin
+from schemas import ManualRunCreate, RunDetailRead
+from security import decrypt_secret
 from services.read_models import get_run_or_404
 from services.settings import get_workspace_setting
 
@@ -130,3 +148,152 @@ def create_manual_run(db: Session, *, workspace_id: UUID, payload: ManualRunCrea
 
     db.commit()
     return get_run_or_404(db, run.id)
+
+
+def _resolve_provider_api_key(db: Session, workspace_id: UUID, provider_key: str | None) -> str | None:
+    if not provider_key:
+        return None
+    credential = db.scalar(
+        select(ProviderCredential).where(
+            ProviderCredential.workspace_id == workspace_id,
+            ProviderCredential.provider == provider_key,
+        )
+    )
+    if not credential or not credential.is_enabled or not credential.encrypted_api_key:
+        raise HTTPException(status_code=400, detail=f"No enabled API credential found for provider '{provider_key}'")
+    return decrypt_secret(credential.encrypted_api_key)
+
+
+def _update_run_status(db: Session, run: Run, *, status: RunStatus, message: str) -> None:
+    run.status = status
+    db.add(RunLog(run_id=run.id, level="info", message=message))
+    db.add(RunStepEvent(run_id=run.id, step_name=status.value, status=QueueJobStatus(status.value), message=message))
+
+
+def _complete_run(db: Session, run: Run) -> RunDetailRead:
+    run.completed_at = datetime.now(timezone.utc)
+    if run.started_at:
+        run.duration_seconds = int((run.completed_at - run.started_at).total_seconds())
+    run.mentions_count = sum(result.mentions_count for result in run.scrape_results)
+    queued_or_running = any(job.status in {QueueJobStatus.QUEUED, QueueJobStatus.RUNNING} for job in run.queue_jobs)
+    failed = any(job.status == QueueJobStatus.FAILED for job in run.queue_jobs)
+    run.status = RunStatus.FAILED if failed and not queued_or_running else RunStatus.COMPLETED
+    db.add(
+        RunStepEvent(
+            run_id=run.id,
+            step_name="completed" if run.status == RunStatus.COMPLETED else "failed",
+            status=QueueJobStatus.COMPLETED if run.status == RunStatus.COMPLETED else QueueJobStatus.FAILED,
+            message=f"Processed {len(run.queue_jobs)} queued job(s)",
+        )
+    )
+    db.add(RunLog(run_id=run.id, level="info", message=f"Run finished with status '{run.status.value}'"))
+    db.commit()
+    return get_run_or_404(db, run.id)
+
+
+def execute_run_now(db: Session, *, run_id: UUID) -> RunDetailRead:
+    run = db.scalar(
+        select(Run)
+        .where(Run.id == run_id)
+        .options(
+            selectinload(Run.queue_jobs).selectinload(QueueJob.connector),
+            selectinload(Run.scrape_results),
+            selectinload(Run.run_prompts),
+        )
+    )
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.status not in {RunStatus.QUEUED, RunStatus.FAILED}:
+        raise HTTPException(status_code=400, detail="Only queued or failed runs can be executed")
+
+    queued_jobs = [job for job in run.queue_jobs if job.status == QueueJobStatus.QUEUED]
+    if not queued_jobs:
+        raise HTTPException(status_code=400, detail="Run has no queued jobs to execute")
+
+    run.status = RunStatus.RUNNING
+    run.started_at = datetime.now(timezone.utc)
+    db.add(RunLog(run_id=run.id, level="info", message=f"Starting synchronous execution for {len(queued_jobs)} queued job(s)"))
+    db.add(RunStepEvent(run_id=run.id, step_name="running", status=QueueJobStatus.RUNNING, message="Processing queued jobs"))
+    db.flush()
+
+    run_prompt_by_id = {str(item.id): item for item in run.run_prompts}
+
+    for job in queued_jobs:
+        connector = job.connector or (db.get(Connector, job.connector_id) if job.connector_id else None)
+        prompt = db.get(Prompt, job.prompt_id) if job.prompt_id else None
+        if connector is None or prompt is None:
+            job.status = QueueJobStatus.FAILED
+            job.error_message = "Missing connector or prompt for queued job"
+            continue
+
+        run_prompt = run_prompt_by_id.get(str((job.payload_json or {}).get("run_prompt_id")))
+        job.status = QueueJobStatus.RUNNING
+        job.started_at = datetime.now(timezone.utc)
+        if run_prompt:
+            run_prompt.status = QueueJobStatus.RUNNING
+
+        try:
+            runner = build_scraper_runner(connector.implementation_key)
+            result = runner.run(
+                ScraperInput(
+                    workspace_id=run.workspace_id,
+                    connector_id=connector.id,
+                    prompt_id=prompt.id,
+                    run_id=run.id,
+                    provider_key=connector.provider_key,
+                    provider_api_key=_resolve_provider_api_key(db, run.workspace_id, connector.provider_key),
+                    model=str((job.payload_json or {}).get("model") or ""),
+                    prompt_text=prompt.prompt_text,
+                    target_brand=prompt.target_brand,
+                    expected_competitors=prompt.expected_competitors,
+                    config=connector.config_json or {},
+                )
+            )
+            scrape_result = ScrapeResult(
+                run_id=run.id,
+                prompt_id=prompt.id,
+                run_prompt_id=run_prompt.id if run_prompt else None,
+                llm_provider=connector.provider_key or connector.implementation_key,
+                llm_model=str((job.payload_json or {}).get("model") or ""),
+                raw_output=result.raw_output,
+                target_mentioned=result.target_mentioned,
+                competitors_mentioned=result.competitors_mentioned,
+                sentiment_score=result.sentiment_score,
+                mentions_count=result.mentions_count,
+                citations=[citation.model_dump() if isinstance(citation, CitationResult) else dict(citation) for citation in result.citations],
+                sources=[citation.model_dump() if isinstance(citation, CitationResult) else dict(citation) for citation in result.citations],
+            )
+            db.add(scrape_result)
+            db.flush()
+
+            for citation in result.citations:
+                citation_row = citation if isinstance(citation, CitationResult) else CitationResult.model_validate(citation)
+                db.add(
+                    SourceCitation(
+                        scrape_result_id=scrape_result.id,
+                        source_type=citation_row.source_type,
+                        domain=citation_row.domain,
+                        url=citation_row.url,
+                        citation_count=citation_row.citation_count,
+                        metadata_json=citation_row.metadata,
+                    )
+                )
+
+            job.status = QueueJobStatus.COMPLETED
+            job.completed_at = datetime.now(timezone.utc)
+            job.error_message = None
+            if run_prompt:
+                run_prompt.status = QueueJobStatus.COMPLETED
+                run_prompt.mentions_count = result.mentions_count
+                run_prompt.error_message = None
+            db.add(RunLog(run_id=run.id, level="info", message=f"Completed prompt '{prompt.id}' for model '{scrape_result.llm_model}'"))
+        except HTTPException as exc:
+            job.status = QueueJobStatus.FAILED
+            job.completed_at = datetime.now(timezone.utc)
+            job.error_message = str(exc.detail)
+            if run_prompt:
+                run_prompt.status = QueueJobStatus.FAILED
+                run_prompt.error_message = str(exc.detail)
+            db.add(RunLog(run_id=run.id, level="error", message=f"Job {job.id} failed: {exc.detail}"))
+
+    return _complete_run(db, run)

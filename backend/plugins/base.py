@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from models import ConnectorType
 
@@ -14,6 +14,8 @@ class ScraperInput(BaseModel):
     connector_id: UUID
     prompt_id: UUID
     run_id: UUID
+    provider_key: str | None = None
+    provider_api_key: str | None = None
     model: str
     prompt_text: str
     target_brand: str
@@ -35,7 +37,7 @@ class ScraperOutput(BaseModel):
     competitors_mentioned: list[str]
     sentiment_score: float | None = None
     mentions_count: int = 0
-    citations: list[CitationResult] = []
+    citations: list[CitationResult] = Field(default_factory=list)
     metadata: dict[str, Any] | None = None
 
 
