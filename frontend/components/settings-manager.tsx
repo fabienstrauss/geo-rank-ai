@@ -19,8 +19,10 @@ import {
   createConnector,
   deleteConnector,
   getConnectors,
+  LlmApiConnectorConfig,
   getProviderCredentials,
   getSettings,
+  UiScraperConnectorConfig,
   updateConnector,
   upsertProviderCredential,
   upsertSetting,
@@ -31,6 +33,14 @@ type ThemeMode = "light" | "dark";
 type ProviderKey = "openai" | "anthropic" | "google";
 type ModelOption = "GPT-5" | "Claude" | "Gemini" | "Perplexity";
 type ConnectorType = "llm_api" | "ui_scraper";
+type ConnectorForm = {
+  id: string;
+  name: string;
+  connector_type: ConnectorType;
+  provider_key?: string | null;
+  is_enabled: boolean;
+  config_json?: Record<string, unknown> | null;
+};
 
 const modelOptions: ModelOption[] = ["GPT-5", "Claude", "Gemini", "Perplexity"];
 
@@ -46,6 +56,47 @@ function maskKey(value: string) {
   return `${value.slice(0, 4)}••••••${value.slice(-4)}`;
 }
 
+function defaultConnectorConfig(type: ConnectorType, provider?: ProviderKey): Record<string, unknown> {
+  if (type === "llm_api") {
+    const config: LlmApiConnectorConfig = {
+      provider: provider ?? "openai",
+      model: "",
+      temperature: 0.2,
+      max_tokens: 1200,
+      timeout_seconds: 60,
+      retry_limit: 2,
+    };
+    return config as Record<string, unknown>;
+  }
+
+  const config: UiScraperConnectorConfig = {
+    base_url: "",
+    render_javascript: true,
+    timeout_seconds: 90,
+    rate_limit_per_minute: 30,
+    use_proxy: false,
+  };
+  return config as Record<string, unknown>;
+}
+
+function normalizeConnectorForState(connector: {
+  id: string;
+  name: string;
+  connector_type: ConnectorType;
+  provider_key?: string | null;
+  is_enabled: boolean;
+  config_json?: Record<string, unknown> | null;
+}): ConnectorForm {
+  return {
+    id: connector.id,
+    name: connector.name,
+    connector_type: connector.connector_type,
+    provider_key: connector.provider_key,
+    is_enabled: connector.is_enabled,
+    config_json: connector.config_json ?? defaultConnectorConfig(connector.connector_type, connector.provider_key as ProviderKey | undefined),
+  };
+}
+
 export function SettingsManager() {
   const { activeWorkspace } = useWorkspace();
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
@@ -54,9 +105,7 @@ export function SettingsManager() {
   const [trackedBrand, setTrackedBrand] = useState("GeoRank AI");
   const [defaultModels, setDefaultModels] = useState<ModelOption[]>(["GPT-5", "Claude"]);
   const [defaultConnectorId, setDefaultConnectorId] = useState("");
-  const [connectors, setConnectors] = useState<
-    { id: string; name: string; connector_type: ConnectorType; provider_key?: string | null; is_enabled: boolean }[]
-  >([]);
+  const [connectors, setConnectors] = useState<ConnectorForm[]>([]);
   const [newConnectorName, setNewConnectorName] = useState("");
   const [newConnectorType, setNewConnectorType] = useState<ConnectorType>("llm_api");
   const [newConnectorProvider, setNewConnectorProvider] = useState<ProviderKey>("openai");
@@ -76,13 +125,16 @@ export function SettingsManager() {
       ]);
       setWorkspaceId(activeWorkspace.id);
       setConnectors(
-        connectorRows.map((connector) => ({
-          id: connector.id,
-          name: connector.name,
-          connector_type: connector.connector_type as ConnectorType,
-          provider_key: connector.provider_key,
-          is_enabled: connector.is_enabled,
-        }))
+        connectorRows.map((connector) =>
+          normalizeConnectorForState({
+            id: connector.id,
+            name: connector.name,
+            connector_type: connector.connector_type as ConnectorType,
+            provider_key: connector.provider_key,
+            is_enabled: connector.is_enabled,
+            config_json: connector.config_json,
+          })
+        )
       );
 
       const themeSetting = settings.find((item) => item.key === "theme");
@@ -168,6 +220,57 @@ export function SettingsManager() {
     );
   };
 
+  const syncCredentialState = async () => {
+    if (!workspaceId) return;
+    const credentials = await getProviderCredentials(workspaceId);
+    const mapped = credentials.reduce<Record<ProviderKey, string>>(
+      (acc, credential) => {
+        acc[credential.provider as ProviderKey] = credential.masked_api_key ?? "";
+        return acc;
+      },
+      { openai: "", anthropic: "", google: "" }
+    );
+    const mappedHasKeys = credentials.reduce<Record<ProviderKey, boolean>>(
+      (acc, credential) => {
+        acc[credential.provider as ProviderKey] = credential.has_api_key;
+        return acc;
+      },
+      { openai: false, anthropic: false, google: false }
+    );
+    setKeys(mapped);
+    setHasKeys(mappedHasKeys);
+  };
+
+  const setCredentialEnabled = async (provider: ProviderKey, enabled: boolean) => {
+    if (!workspaceId) return;
+    await upsertProviderCredential(workspaceId, provider, {
+      is_enabled: enabled,
+      is_default: enabled ? defaultProvider === provider : false,
+    });
+    if (!enabled && defaultProvider === provider) {
+      setDefaultProvider("openai");
+      await upsertSetting(workspaceId, "default_provider", { provider: "openai" });
+    }
+    await syncCredentialState();
+  };
+
+  const clearProviderKey = async (provider: ProviderKey) => {
+    if (!workspaceId) return;
+    await upsertProviderCredential(workspaceId, provider, {
+      clear_secret: true,
+      is_default: false,
+      is_enabled: false,
+    });
+    if (defaultProvider === provider) {
+      setDefaultProvider("openai");
+      await upsertSetting(workspaceId, "default_provider", { provider: "openai" });
+    }
+    setDraftKeys((current) => ({ ...current, [provider]: "" }));
+    setEditingProvider(null);
+    setVisibleProvider(null);
+    await syncCredentialState();
+  };
+
   const saveWorkspaceProfile = async () => {
     if (!workspaceId) return;
     await Promise.all([
@@ -181,13 +284,16 @@ export function SettingsManager() {
     if (!workspaceId) return;
     const connectorRows = await getConnectors(workspaceId);
     setConnectors(
-      connectorRows.map((connector) => ({
-        id: connector.id,
-        name: connector.name,
-        connector_type: connector.connector_type as ConnectorType,
-        provider_key: connector.provider_key,
-        is_enabled: connector.is_enabled,
-      }))
+      connectorRows.map((connector) =>
+        normalizeConnectorForState({
+          id: connector.id,
+          name: connector.name,
+          connector_type: connector.connector_type as ConnectorType,
+          provider_key: connector.provider_key,
+          is_enabled: connector.is_enabled,
+          config_json: connector.config_json,
+        })
+      )
     );
   };
 
@@ -196,9 +302,9 @@ export function SettingsManager() {
     await createConnector(workspaceId, {
       name: newConnectorName.trim(),
       connector_type: newConnectorType,
-      provider_key: newConnectorProvider,
+      provider_key: newConnectorType === "llm_api" ? newConnectorProvider : null,
       is_enabled: true,
-      config_json: null,
+      config_json: defaultConnectorConfig(newConnectorType, newConnectorProvider),
     });
     setNewConnectorName("");
     await reloadConnectors();
@@ -372,7 +478,8 @@ export function SettingsManager() {
                 </div>
               ) : (
                 connectors.map((connector) => (
-                  <div key={connector.id} className="grid gap-3 rounded-xl border bg-card p-4 md:grid-cols-[1.2fr_0.8fr_0.8fr_auto_auto] md:items-center">
+                  <div key={connector.id} className="space-y-4 rounded-xl border bg-card p-4">
+                    <div className="grid gap-3 md:grid-cols-[1.2fr_0.8fr_0.8fr_auto_auto] md:items-center">
                     <Input
                       value={connector.name}
                       onChange={(event) =>
@@ -386,7 +493,17 @@ export function SettingsManager() {
                       onChange={(event) =>
                         setConnectors((current) =>
                           current.map((item) =>
-                            item.id === connector.id ? { ...item, connector_type: event.target.value as ConnectorType } : item
+                            item.id === connector.id
+                              ? {
+                                  ...item,
+                                  connector_type: event.target.value as ConnectorType,
+                                  provider_key: event.target.value === "llm_api" ? item.provider_key ?? "openai" : null,
+                                  config_json: defaultConnectorConfig(
+                                    event.target.value as ConnectorType,
+                                    (item.provider_key as ProviderKey | undefined) ?? "openai"
+                                  ),
+                                }
+                              : item
                           )
                         )
                       }
@@ -396,17 +513,27 @@ export function SettingsManager() {
                       <option value="ui_scraper">UI Scraper</option>
                     </select>
                     <select
-                      value={connector.provider_key ?? ""}
+                      value={connector.connector_type === "llm_api" ? connector.provider_key ?? "openai" : ""}
                       onChange={(event) =>
                         setConnectors((current) =>
                           current.map((item) =>
-                            item.id === connector.id ? { ...item, provider_key: event.target.value || null } : item
+                            item.id === connector.id
+                              ? {
+                                  ...item,
+                                  provider_key: item.connector_type === "llm_api" ? event.target.value || null : null,
+                                  config_json:
+                                    item.connector_type === "llm_api"
+                                      ? { ...(item.config_json ?? {}), provider: event.target.value || null }
+                                      : item.config_json,
+                                }
+                              : item
                           )
                         )
                       }
+                      disabled={connector.connector_type !== "llm_api"}
                       className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
                     >
-                      <option value="">No provider</option>
+                      {connector.connector_type !== "llm_api" ? <option value="">No provider</option> : null}
                       {providers.map((provider) => (
                         <option key={provider.key} value={provider.key}>
                           {provider.label}
@@ -434,6 +561,7 @@ export function SettingsManager() {
                             connector_type: connector.connector_type,
                             provider_key: connector.provider_key ?? null,
                             is_enabled: connector.is_enabled,
+                            config_json: connector.config_json ?? null,
                           });
                           await reloadConnectors();
                         }}
@@ -456,6 +584,186 @@ export function SettingsManager() {
                         Delete
                       </Button>
                     </div>
+                    </div>
+
+                    {connector.connector_type === "llm_api" ? (
+                      <div className="grid gap-3 md:grid-cols-4">
+                        <Input
+                          value={String((connector.config_json?.model as string | undefined) ?? "")}
+                          onChange={(event) =>
+                            setConnectors((current) =>
+                              current.map((item) =>
+                                item.id === connector.id
+                                  ? { ...item, config_json: { ...(item.config_json ?? {}), model: event.target.value } }
+                                  : item
+                              )
+                            )
+                          }
+                          placeholder="Model"
+                        />
+                        <Input
+                          type="number"
+                          step="0.1"
+                          value={String((connector.config_json?.temperature as number | undefined) ?? 0.2)}
+                          onChange={(event) =>
+                            setConnectors((current) =>
+                              current.map((item) =>
+                                item.id === connector.id
+                                  ? {
+                                      ...item,
+                                      config_json: { ...(item.config_json ?? {}), temperature: Number(event.target.value || 0) },
+                                    }
+                                  : item
+                              )
+                            )
+                          }
+                          placeholder="Temperature"
+                        />
+                        <Input
+                          type="number"
+                          value={String((connector.config_json?.max_tokens as number | undefined) ?? 1200)}
+                          onChange={(event) =>
+                            setConnectors((current) =>
+                              current.map((item) =>
+                                item.id === connector.id
+                                  ? {
+                                      ...item,
+                                      config_json: { ...(item.config_json ?? {}), max_tokens: Number(event.target.value || 0) },
+                                    }
+                                  : item
+                              )
+                            )
+                          }
+                          placeholder="Max tokens"
+                        />
+                        <div className="grid grid-cols-2 gap-3">
+                          <Input
+                            type="number"
+                            value={String((connector.config_json?.timeout_seconds as number | undefined) ?? 60)}
+                            onChange={(event) =>
+                              setConnectors((current) =>
+                                current.map((item) =>
+                                  item.id === connector.id
+                                    ? {
+                                        ...item,
+                                        config_json: { ...(item.config_json ?? {}), timeout_seconds: Number(event.target.value || 0) },
+                                      }
+                                    : item
+                                )
+                              )
+                            }
+                            placeholder="Timeout"
+                          />
+                          <Input
+                            type="number"
+                            value={String((connector.config_json?.retry_limit as number | undefined) ?? 2)}
+                            onChange={(event) =>
+                              setConnectors((current) =>
+                                current.map((item) =>
+                                  item.id === connector.id
+                                    ? {
+                                        ...item,
+                                        config_json: { ...(item.config_json ?? {}), retry_limit: Number(event.target.value || 0) },
+                                      }
+                                    : item
+                                )
+                              )
+                            }
+                            placeholder="Retries"
+                          />
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="grid gap-3 md:grid-cols-[1.4fr_0.8fr_0.8fr_auto_auto] md:items-center">
+                        <Input
+                          value={String((connector.config_json?.base_url as string | undefined) ?? "")}
+                          onChange={(event) =>
+                            setConnectors((current) =>
+                              current.map((item) =>
+                                item.id === connector.id
+                                  ? { ...item, config_json: { ...(item.config_json ?? {}), base_url: event.target.value } }
+                                  : item
+                              )
+                            )
+                          }
+                          placeholder="Base URL"
+                        />
+                        <Input
+                          type="number"
+                          value={String((connector.config_json?.timeout_seconds as number | undefined) ?? 90)}
+                          onChange={(event) =>
+                            setConnectors((current) =>
+                              current.map((item) =>
+                                item.id === connector.id
+                                  ? {
+                                      ...item,
+                                      config_json: { ...(item.config_json ?? {}), timeout_seconds: Number(event.target.value || 0) },
+                                    }
+                                  : item
+                              )
+                            )
+                          }
+                          placeholder="Timeout"
+                        />
+                        <Input
+                          type="number"
+                          value={String((connector.config_json?.rate_limit_per_minute as number | undefined) ?? 30)}
+                          onChange={(event) =>
+                            setConnectors((current) =>
+                              current.map((item) =>
+                                item.id === connector.id
+                                  ? {
+                                      ...item,
+                                      config_json: { ...(item.config_json ?? {}), rate_limit_per_minute: Number(event.target.value || 0) },
+                                    }
+                                  : item
+                              )
+                            )
+                          }
+                          placeholder="Rate limit/min"
+                        />
+                        <Button
+                          variant={(connector.config_json?.render_javascript as boolean | undefined) !== false ? "default" : "outline"}
+                          onClick={() =>
+                            setConnectors((current) =>
+                              current.map((item) =>
+                                item.id === connector.id
+                                  ? {
+                                      ...item,
+                                      config_json: {
+                                        ...(item.config_json ?? {}),
+                                        render_javascript: !((item.config_json?.render_javascript as boolean | undefined) !== false),
+                                      },
+                                    }
+                                  : item
+                              )
+                            )
+                          }
+                        >
+                          Render JS
+                        </Button>
+                        <Button
+                          variant={(connector.config_json?.use_proxy as boolean | undefined) === true ? "default" : "outline"}
+                          onClick={() =>
+                            setConnectors((current) =>
+                              current.map((item) =>
+                                item.id === connector.id
+                                  ? {
+                                      ...item,
+                                      config_json: {
+                                        ...(item.config_json ?? {}),
+                                        use_proxy: !((item.config_json?.use_proxy as boolean | undefined) === true),
+                                      },
+                                    }
+                                  : item
+                              )
+                            )
+                          }
+                        >
+                          Use Proxy
+                        </Button>
+                      </div>
+                    )}
                   </div>
                 ))
               )}
@@ -515,7 +823,19 @@ export function SettingsManager() {
                       </Button>
                     </>
                   ) : (
-                    <Button onClick={() => setEditingProvider(provider.key)}>{hasKeys[provider.key] ? "Replace Key" : "Add Key"}</Button>
+                    <>
+                      <Button onClick={() => setEditingProvider(provider.key)}>{hasKeys[provider.key] ? "Replace Key" : "Add Key"}</Button>
+                      {hasKeys[provider.key] ? (
+                        <>
+                          <Button variant="outline" onClick={() => void setCredentialEnabled(provider.key, false)}>
+                            Disable
+                          </Button>
+                          <Button variant="outline" onClick={() => void clearProviderKey(provider.key)}>
+                            Remove Key
+                          </Button>
+                        </>
+                      ) : null}
+                    </>
                   )}
                 </div>
               </CardFooter>
