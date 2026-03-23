@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -8,8 +7,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import and_, cast, func, or_, select, String
 from sqlalchemy.orm import Session, selectinload
 
+from api.root import router as root_router
+from api.workspaces import router as workspace_router
 from config import get_settings
-from database import Base, get_db
+from deps import DbSession, get_workspace_or_404
 from models import (
     CompetitorSnapshot,
     Connector,
@@ -27,7 +28,6 @@ from models import (
     WorkspaceSetting,
     Worker,
 )
-from seed import seed_dev_data
 from security import encrypt_secret, mask_secret
 from schemas import (
     CategoryCreate,
@@ -62,7 +62,6 @@ from schemas import (
 
 
 app = FastAPI(title="GeoRank AI Backend")
-DbSession = Annotated[Session, Depends(get_db)]
 settings = get_settings()
 SUPPORTED_PROVIDER_KEYS = {"openai", "anthropic", "google"}
 
@@ -73,13 +72,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-def get_workspace_or_404(db: Session, workspace_id: UUID) -> Workspace:
-    workspace = db.get(Workspace, workspace_id)
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-    return workspace
+app.include_router(root_router)
+app.include_router(workspace_router)
 
 
 def get_category_or_404(db: Session, category_id: UUID) -> PromptCategory:
@@ -254,54 +248,6 @@ def normalize_connector_payload(
 
 def get_workspace_setting(db: Session, workspace_id: UUID, key: str) -> WorkspaceSetting | None:
     return db.scalar(select(WorkspaceSetting).where(WorkspaceSetting.workspace_id == workspace_id, WorkspaceSetting.key == key))
-
-
-@app.get("/")
-def read_root():
-    return {
-        "status": "ok",
-        "message": "GeoRank API is running",
-        "database_tables": sorted(Base.metadata.tables.keys()),
-    }
-
-
-@app.post("/dev/seed", response_model=WorkspaceRead)
-def seed_database(db: DbSession):
-    workspace = seed_dev_data(db)
-    return workspace
-
-
-@app.get("/workspaces", response_model=list[WorkspaceRead])
-def list_workspaces(db: DbSession):
-    return db.scalars(select(Workspace).order_by(Workspace.created_at.asc())).all()
-
-
-@app.post("/workspaces", response_model=WorkspaceRead, status_code=201)
-def create_workspace(payload: WorkspaceCreate, db: DbSession):
-    workspace = Workspace(name=payload.name, plan=payload.plan)
-    db.add(workspace)
-    db.commit()
-    db.refresh(workspace)
-    return workspace
-
-
-@app.patch("/workspaces/{workspace_id}", response_model=WorkspaceRead)
-def update_workspace(workspace_id: UUID, payload: WorkspaceUpdate, db: DbSession):
-    workspace = get_workspace_or_404(db, workspace_id)
-    if payload.name is not None:
-        workspace.name = payload.name
-    if payload.plan is not None:
-        workspace.plan = payload.plan
-    db.commit()
-    db.refresh(workspace)
-    return workspace
-
-
-@app.delete("/workspaces/{workspace_id}", status_code=204)
-def delete_workspace(workspace_id: UUID, db: DbSession):
-    workspace = get_workspace_or_404(db, workspace_id)
-    db.delete(workspace)
-    db.commit()
 
 
 @app.get("/workspaces/{workspace_id}/categories", response_model=list[PromptCategoryRead])
