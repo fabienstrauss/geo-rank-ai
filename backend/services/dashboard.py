@@ -2,66 +2,15 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
+from sqlalchemy.orm import Session, selectinload
 
-from api.dashboard import router as dashboard_router
-from api.prompts import router as prompts_router
-from api.root import router as root_router
-from api.runs import router as runs_router
-from api.settings import router as settings_router
-from api.workspaces import router as workspace_router
-from config import get_settings
-from deps import DbSession, get_workspace_or_404
-from models import Connector, ConnectorIncident, QueueJob, Worker
-from schemas import ConnectorIncidentRead, QueueJobRead, WorkerRead
+from deps import get_workspace_or_404
+from models import CompetitorSnapshot, Prompt, PromptMetricSnapshot, Run, ScrapeResult, SourceCitation, WorkspaceSetting
+from schemas import DashboardRead
 
 
-app = FastAPI(title="GeoRank AI Backend")
-settings = get_settings()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-app.include_router(root_router)
-app.include_router(workspace_router)
-app.include_router(prompts_router)
-app.include_router(runs_router)
-app.include_router(settings_router)
-app.include_router(dashboard_router)
-
-
-@app.get("/workspaces/{workspace_id}/connector-incidents", response_model=list[ConnectorIncidentRead])
-def list_connector_incidents(workspace_id: UUID, db: DbSession):
-    get_workspace_or_404(db, workspace_id)
-    return db.scalars(
-        select(ConnectorIncident)
-        .join(Connector, ConnectorIncident.connector_id == Connector.id)
-        .where(Connector.workspace_id == workspace_id)
-        .order_by(ConnectorIncident.occurred_at.desc())
-    ).all()
-
-
-@app.get("/workers", response_model=list[WorkerRead])
-def list_workers(db: DbSession):
-    return db.scalars(select(Worker).order_by(Worker.worker_name.asc())).all()
-
-
-@app.get("/workspaces/{workspace_id}/queue-jobs", response_model=list[QueueJobRead])
-def list_queue_jobs(workspace_id: UUID, db: DbSession):
-    get_workspace_or_404(db, workspace_id)
-    return db.scalars(
-        select(QueueJob).where(QueueJob.workspace_id == workspace_id).order_by(QueueJob.queued_at.desc())
-    ).all()
-
-
-@app.get("/workspaces/{workspace_id}/dashboard", response_model=DashboardRead)
-def get_dashboard(workspace_id: UUID, db: DbSession):
+def build_dashboard_response(db: Session, workspace_id: UUID) -> DashboardRead:
     workspace = get_workspace_or_404(db, workspace_id)
     setting_rows = db.scalars(select(WorkspaceSetting).where(WorkspaceSetting.workspace_id == workspace_id)).all()
     settings_map = {item.key: item.value_json for item in setting_rows}
@@ -153,7 +102,6 @@ def get_dashboard(workspace_id: UUID, db: DbSession):
     ]
     top_source_rows = sorted(top_sources.values(), key=lambda item: int(item["citations"]), reverse=True)[:4]
 
-    latest_run = max((run for run in runs if run.completed_at), key=lambda run: run.completed_at, default=None)
     sorted_prompt_snapshot_groups = [items for items in prompt_snapshots.values() if items]
     latest_prompt_snapshots = [items[-1] for items in sorted_prompt_snapshot_groups]
     previous_prompt_snapshots = [items[-2] for items in sorted_prompt_snapshot_groups if len(items) > 1]
