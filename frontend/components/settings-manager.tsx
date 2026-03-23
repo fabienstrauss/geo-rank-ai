@@ -19,8 +19,10 @@ import {
   createConnector,
   deleteConnector,
   getConnectors,
+  getScraperPlugins,
   LlmApiConnectorConfig,
   getProviderCredentials,
+  ScraperPlugin,
   getSettings,
   UiScraperConnectorConfig,
   updateConnector,
@@ -36,6 +38,7 @@ type ConnectorType = "llm_api" | "ui_scraper";
 type ConnectorForm = {
   id: string;
   name: string;
+  implementation_key: string;
   connector_type: ConnectorType;
   provider_key?: string | null;
   is_enabled: boolean;
@@ -79,9 +82,15 @@ function defaultConnectorConfig(type: ConnectorType, provider?: ProviderKey): Re
   return config as Record<string, unknown>;
 }
 
+function defaultConfigForPlugin(plugin: ScraperPlugin | undefined): Record<string, unknown> {
+  if (!plugin) return defaultConnectorConfig("llm_api", "openai");
+  return defaultConnectorConfig(plugin.scraper_type, plugin.provider_key as ProviderKey | undefined);
+}
+
 function normalizeConnectorForState(connector: {
   id: string;
   name: string;
+  implementation_key: string;
   connector_type: ConnectorType;
   provider_key?: string | null;
   is_enabled: boolean;
@@ -90,6 +99,7 @@ function normalizeConnectorForState(connector: {
   return {
     id: connector.id,
     name: connector.name,
+    implementation_key: connector.implementation_key,
     connector_type: connector.connector_type,
     provider_key: connector.provider_key,
     is_enabled: connector.is_enabled,
@@ -106,9 +116,9 @@ export function SettingsManager() {
   const [defaultModels, setDefaultModels] = useState<ModelOption[]>(["GPT-5", "Claude"]);
   const [defaultConnectorId, setDefaultConnectorId] = useState("");
   const [connectors, setConnectors] = useState<ConnectorForm[]>([]);
+  const [scraperPlugins, setScraperPlugins] = useState<ScraperPlugin[]>([]);
   const [newConnectorName, setNewConnectorName] = useState("");
-  const [newConnectorType, setNewConnectorType] = useState<ConnectorType>("llm_api");
-  const [newConnectorProvider, setNewConnectorProvider] = useState<ProviderKey>("openai");
+  const [newImplementationKey, setNewImplementationKey] = useState("openai_api");
   const [keys, setKeys] = useState<Record<ProviderKey, string>>({ openai: "", anthropic: "", google: "" });
   const [hasKeys, setHasKeys] = useState<Record<ProviderKey, boolean>>({ openai: false, anthropic: false, google: false });
   const [draftKeys, setDraftKeys] = useState<Record<ProviderKey, string>>({ openai: "", anthropic: "", google: "" });
@@ -118,17 +128,20 @@ export function SettingsManager() {
   useEffect(() => {
     async function load() {
       if (!activeWorkspace) return;
-      const [settings, credentials, connectorRows] = await Promise.all([
+      const [settings, credentials, connectorRows, pluginRows] = await Promise.all([
         getSettings(activeWorkspace.id),
         getProviderCredentials(activeWorkspace.id),
         getConnectors(activeWorkspace.id),
+        getScraperPlugins(),
       ]);
       setWorkspaceId(activeWorkspace.id);
+      setScraperPlugins(pluginRows);
       setConnectors(
         connectorRows.map((connector) =>
           normalizeConnectorForState({
             id: connector.id,
             name: connector.name,
+            implementation_key: connector.implementation_key,
             connector_type: connector.connector_type as ConnectorType,
             provider_key: connector.provider_key,
             is_enabled: connector.is_enabled,
@@ -136,6 +149,7 @@ export function SettingsManager() {
           })
         )
       );
+      setNewImplementationKey((current) => current || pluginRows[0]?.key || "openai_api");
 
       const themeSetting = settings.find((item) => item.key === "theme");
       const providerSetting = settings.find((item) => item.key === "default_provider");
@@ -288,6 +302,7 @@ export function SettingsManager() {
         normalizeConnectorForState({
           id: connector.id,
           name: connector.name,
+          implementation_key: connector.implementation_key,
           connector_type: connector.connector_type as ConnectorType,
           provider_key: connector.provider_key,
           is_enabled: connector.is_enabled,
@@ -299,16 +314,20 @@ export function SettingsManager() {
 
   const addConnector = async () => {
     if (!workspaceId || !newConnectorName.trim()) return;
+    const plugin = scraperPlugins.find((item) => item.key === newImplementationKey);
     await createConnector(workspaceId, {
       name: newConnectorName.trim(),
-      connector_type: newConnectorType,
-      provider_key: newConnectorType === "llm_api" ? newConnectorProvider : null,
+      implementation_key: newImplementationKey,
+      connector_type: plugin?.scraper_type ?? "llm_api",
+      provider_key: (plugin?.provider_key as ProviderKey | undefined) ?? null,
       is_enabled: true,
-      config_json: defaultConnectorConfig(newConnectorType, newConnectorProvider),
+      config_json: defaultConfigForPlugin(plugin),
     });
     setNewConnectorName("");
     await reloadConnectors();
   };
+
+  const selectedNewPlugin = scraperPlugins.find((plugin) => plugin.key === newImplementationKey);
 
   return (
     <div className="space-y-6 pb-8">
@@ -450,24 +469,21 @@ export function SettingsManager() {
             <div className="grid gap-3 rounded-xl border bg-muted/20 p-4 md:grid-cols-[1.2fr_0.8fr_0.8fr_auto]">
               <Input value={newConnectorName} onChange={(event) => setNewConnectorName(event.target.value)} placeholder="Connector name" />
               <select
-                value={newConnectorType}
-                onChange={(event) => setNewConnectorType(event.target.value as ConnectorType)}
+                value={newImplementationKey}
+                onChange={(event) => setNewImplementationKey(event.target.value)}
                 className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
               >
-                <option value="llm_api">LLM API</option>
-                <option value="ui_scraper">UI Scraper</option>
-              </select>
-              <select
-                value={newConnectorProvider}
-                onChange={(event) => setNewConnectorProvider(event.target.value as ProviderKey)}
-                className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
-              >
-                {providers.map((provider) => (
-                  <option key={provider.key} value={provider.key}>
-                    {provider.label}
+                {scraperPlugins.map((plugin) => (
+                  <option key={plugin.key} value={plugin.key}>
+                    {plugin.name}
                   </option>
                 ))}
               </select>
+              <div className="flex h-9 items-center rounded-md border border-input bg-background px-3 text-sm text-muted-foreground">
+                {selectedNewPlugin
+                  ? `${selectedNewPlugin.scraper_type === "ui_scraper" ? "UI scraper" : "LLM API"}${selectedNewPlugin.provider_key ? ` · ${providers.find((provider) => provider.key === selectedNewPlugin.provider_key)?.label ?? selectedNewPlugin.provider_key}` : ""}`
+                  : "No implementation"}
+              </div>
               <Button onClick={() => void addConnector()}>Add Connector</Button>
             </div>
 
@@ -489,57 +505,35 @@ export function SettingsManager() {
                       }
                     />
                     <select
-                      value={connector.connector_type}
+                      value={connector.implementation_key}
                       onChange={(event) =>
                         setConnectors((current) =>
-                          current.map((item) =>
-                            item.id === connector.id
-                              ? {
-                                  ...item,
-                                  connector_type: event.target.value as ConnectorType,
-                                  provider_key: event.target.value === "llm_api" ? item.provider_key ?? "openai" : null,
-                                  config_json: defaultConnectorConfig(
-                                    event.target.value as ConnectorType,
-                                    (item.provider_key as ProviderKey | undefined) ?? "openai"
-                                  ),
-                                }
-                              : item
-                          )
+                          current.map((item) => {
+                            if (item.id !== connector.id) return item;
+                            const plugin = scraperPlugins.find((candidate) => candidate.key === event.target.value);
+                            return {
+                              ...item,
+                              implementation_key: event.target.value,
+                              connector_type: (plugin?.scraper_type ?? item.connector_type) as ConnectorType,
+                              provider_key: (plugin?.provider_key as ProviderKey | undefined) ?? null,
+                              config_json: defaultConfigForPlugin(plugin),
+                            };
+                          })
                         )
                       }
                       className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
                     >
-                      <option value="llm_api">LLM API</option>
-                      <option value="ui_scraper">UI Scraper</option>
-                    </select>
-                    <select
-                      value={connector.connector_type === "llm_api" ? connector.provider_key ?? "openai" : ""}
-                      onChange={(event) =>
-                        setConnectors((current) =>
-                          current.map((item) =>
-                            item.id === connector.id
-                              ? {
-                                  ...item,
-                                  provider_key: item.connector_type === "llm_api" ? event.target.value || null : null,
-                                  config_json:
-                                    item.connector_type === "llm_api"
-                                      ? { ...(item.config_json ?? {}), provider: event.target.value || null }
-                                      : item.config_json,
-                                }
-                              : item
-                          )
-                        )
-                      }
-                      disabled={connector.connector_type !== "llm_api"}
-                      className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
-                    >
-                      {connector.connector_type !== "llm_api" ? <option value="">No provider</option> : null}
-                      {providers.map((provider) => (
-                        <option key={provider.key} value={provider.key}>
-                          {provider.label}
+                      {scraperPlugins.map((plugin) => (
+                        <option key={plugin.key} value={plugin.key}>
+                          {plugin.name}
                         </option>
                       ))}
                     </select>
+                    <div className="flex h-9 items-center rounded-md border border-input bg-background px-3 text-sm text-muted-foreground">
+                      {connector.connector_type === "llm_api"
+                        ? providers.find((provider) => provider.key === connector.provider_key)?.label ?? connector.provider_key ?? "LLM API"
+                        : "UI scraper"}
+                    </div>
                     <Button
                       variant={connector.is_enabled ? "default" : "outline"}
                       onClick={() =>
@@ -558,6 +552,7 @@ export function SettingsManager() {
                         onClick={async () => {
                           await updateConnector(connector.id, {
                             name: connector.name,
+                            implementation_key: connector.implementation_key,
                             connector_type: connector.connector_type,
                             provider_key: connector.provider_key ?? null,
                             is_enabled: connector.is_enabled,
