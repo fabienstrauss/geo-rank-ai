@@ -112,6 +112,23 @@ export type ProviderCredential = {
   metadata_json?: Record<string, unknown> | null;
 };
 
+export type LlmApiConnectorConfig = {
+  provider?: "openai" | "anthropic" | "google" | null;
+  model?: string | null;
+  temperature?: number;
+  max_tokens?: number;
+  timeout_seconds?: number;
+  retry_limit?: number;
+};
+
+export type UiScraperConnectorConfig = {
+  base_url?: string | null;
+  render_javascript?: boolean;
+  timeout_seconds?: number;
+  rate_limit_per_minute?: number;
+  use_proxy?: boolean;
+};
+
 export type Connector = {
   id: string;
   workspace_id: string;
@@ -120,6 +137,7 @@ export type Connector = {
   health_status: string;
   provider_key?: string | null;
   is_enabled: boolean;
+  config_json?: Record<string, unknown> | null;
   success_rate?: number | null;
   average_latency_ms?: number | null;
   last_error?: string | null;
