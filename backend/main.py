@@ -64,6 +64,7 @@ from schemas import (
 app = FastAPI(title="GeoRank AI Backend")
 DbSession = Annotated[Session, Depends(get_db)]
 settings = get_settings()
+SUPPORTED_PROVIDER_KEYS = {"openai", "anthropic", "google"}
 
 app.add_middleware(
     CORSMiddleware,
@@ -249,6 +250,10 @@ def normalize_connector_payload(
 
     normalized = UiScraperConnectorConfig.model_validate(config_json or {}).model_dump()
     return provider_key, normalized
+
+
+def get_workspace_setting(db: Session, workspace_id: UUID, key: str) -> WorkspaceSetting | None:
+    return db.scalar(select(WorkspaceSetting).where(WorkspaceSetting.workspace_id == workspace_id, WorkspaceSetting.key == key))
 
 
 @app.get("/")
@@ -560,9 +565,39 @@ def list_workspace_settings(workspace_id: UUID, db: DbSession):
 @app.put("/workspaces/{workspace_id}/settings/{key}", response_model=WorkspaceSettingRead)
 def upsert_workspace_setting(workspace_id: UUID, key: str, payload: WorkspaceSettingUpsert, db: DbSession):
     get_workspace_or_404(db, workspace_id)
-    setting = db.scalar(
-        select(WorkspaceSetting).where(WorkspaceSetting.workspace_id == workspace_id, WorkspaceSetting.key == key)
-    )
+    if key == "default_provider":
+        provider = str(payload.value_json.get("provider") or "").strip().lower()
+        if provider not in SUPPORTED_PROVIDER_KEYS:
+            raise HTTPException(status_code=422, detail="default_provider must be one of: openai, anthropic, google")
+
+        disabled_credential = db.scalar(
+            select(ProviderCredential).where(
+                ProviderCredential.workspace_id == workspace_id,
+                ProviderCredential.provider == provider,
+                ProviderCredential.is_enabled.is_(False),
+            )
+        )
+        if disabled_credential:
+            raise HTTPException(status_code=400, detail="Cannot set a disabled provider credential as default")
+
+        credentials = db.scalars(select(ProviderCredential).where(ProviderCredential.workspace_id == workspace_id)).all()
+        for credential in credentials:
+            credential.is_default = credential.provider == provider
+
+    if key == "default_connector":
+        connector_id = payload.value_json.get("connector_id")
+        if connector_id:
+            try:
+                connector_uuid = UUID(str(connector_id))
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="default_connector.connector_id must be a valid UUID") from exc
+            connector = db.get(Connector, connector_uuid)
+            if not connector or connector.workspace_id != workspace_id:
+                raise HTTPException(status_code=404, detail="Default connector not found for this workspace")
+            if not connector.is_enabled:
+                raise HTTPException(status_code=400, detail="Cannot set a disabled connector as default")
+
+    setting = get_workspace_setting(db, workspace_id, key)
     if not setting:
         setting = WorkspaceSetting(workspace_id=workspace_id, key=key, value_json=payload.value_json)
         db.add(setting)
@@ -605,6 +640,10 @@ def list_provider_credentials(workspace_id: UUID, db: DbSession):
 @app.put("/workspaces/{workspace_id}/provider-credentials/{provider}", response_model=ProviderCredentialRead)
 def upsert_provider_credential(workspace_id: UUID, provider: str, payload: ProviderCredentialUpsert, db: DbSession):
     get_workspace_or_404(db, workspace_id)
+    provider = provider.strip().lower()
+    if provider not in SUPPORTED_PROVIDER_KEYS:
+        raise HTTPException(status_code=422, detail="Unsupported provider")
+
     credential = db.scalar(
         select(ProviderCredential).where(
             ProviderCredential.workspace_id == workspace_id, ProviderCredential.provider == provider
@@ -643,7 +682,19 @@ def upsert_provider_credential(workspace_id: UUID, provider: str, payload: Provi
         credential.is_default = payload.is_default
     if payload.is_enabled is not None:
         credential.is_enabled = payload.is_enabled
+
+    if credential.is_default and not credential.is_enabled:
+        raise HTTPException(status_code=400, detail="A default provider credential must stay enabled")
+
     credential.metadata_json = merged_metadata or None
+
+    if credential.is_default:
+        setting = get_workspace_setting(db, workspace_id, "default_provider")
+        if not setting:
+            setting = WorkspaceSetting(workspace_id=workspace_id, key="default_provider", value_json={"provider": provider})
+            db.add(setting)
+        else:
+            setting.value_json = {"provider": provider}
 
     db.commit()
     db.refresh(credential)
@@ -707,6 +758,11 @@ def update_connector(connector_id: UUID, payload: ConnectorUpdate, db: DbSession
         config_json=next_config_json,
     )
 
+    default_connector_setting = get_workspace_setting(db, connector.workspace_id, "default_connector")
+    default_connector_id = (default_connector_setting.value_json or {}).get("connector_id") if default_connector_setting else None
+    if default_connector_id == str(connector.id) and payload.is_enabled is False:
+        raise HTTPException(status_code=400, detail="Clear the default connector before disabling it")
+
     for field, value in updates.items():
         setattr(connector, field, value)
     connector.provider_key = provider_key
@@ -722,6 +778,10 @@ def delete_connector(connector_id: UUID, db: DbSession):
     connector = db.get(Connector, connector_id)
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
+    default_connector_setting = get_workspace_setting(db, connector.workspace_id, "default_connector")
+    default_connector_id = (default_connector_setting.value_json or {}).get("connector_id") if default_connector_setting else None
+    if default_connector_id == str(connector.id):
+        raise HTTPException(status_code=400, detail="Clear the default connector before deleting it")
     db.delete(connector)
     db.commit()
 
