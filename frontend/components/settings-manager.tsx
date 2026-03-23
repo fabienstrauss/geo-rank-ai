@@ -168,6 +168,57 @@ export function SettingsManager() {
     );
   };
 
+  const syncCredentialState = async () => {
+    if (!workspaceId) return;
+    const credentials = await getProviderCredentials(workspaceId);
+    const mapped = credentials.reduce<Record<ProviderKey, string>>(
+      (acc, credential) => {
+        acc[credential.provider as ProviderKey] = credential.masked_api_key ?? "";
+        return acc;
+      },
+      { openai: "", anthropic: "", google: "" }
+    );
+    const mappedHasKeys = credentials.reduce<Record<ProviderKey, boolean>>(
+      (acc, credential) => {
+        acc[credential.provider as ProviderKey] = credential.has_api_key;
+        return acc;
+      },
+      { openai: false, anthropic: false, google: false }
+    );
+    setKeys(mapped);
+    setHasKeys(mappedHasKeys);
+  };
+
+  const setCredentialEnabled = async (provider: ProviderKey, enabled: boolean) => {
+    if (!workspaceId) return;
+    await upsertProviderCredential(workspaceId, provider, {
+      is_enabled: enabled,
+      is_default: enabled ? defaultProvider === provider : false,
+    });
+    if (!enabled && defaultProvider === provider) {
+      setDefaultProvider("openai");
+      await upsertSetting(workspaceId, "default_provider", { provider: "openai" });
+    }
+    await syncCredentialState();
+  };
+
+  const clearProviderKey = async (provider: ProviderKey) => {
+    if (!workspaceId) return;
+    await upsertProviderCredential(workspaceId, provider, {
+      clear_secret: true,
+      is_default: false,
+      is_enabled: false,
+    });
+    if (defaultProvider === provider) {
+      setDefaultProvider("openai");
+      await upsertSetting(workspaceId, "default_provider", { provider: "openai" });
+    }
+    setDraftKeys((current) => ({ ...current, [provider]: "" }));
+    setEditingProvider(null);
+    setVisibleProvider(null);
+    await syncCredentialState();
+  };
+
   const saveWorkspaceProfile = async () => {
     if (!workspaceId) return;
     await Promise.all([
@@ -515,7 +566,19 @@ export function SettingsManager() {
                       </Button>
                     </>
                   ) : (
-                    <Button onClick={() => setEditingProvider(provider.key)}>{hasKeys[provider.key] ? "Replace Key" : "Add Key"}</Button>
+                    <>
+                      <Button onClick={() => setEditingProvider(provider.key)}>{hasKeys[provider.key] ? "Replace Key" : "Add Key"}</Button>
+                      {hasKeys[provider.key] ? (
+                        <>
+                          <Button variant="outline" onClick={() => void setCredentialEnabled(provider.key, false)}>
+                            Disable
+                          </Button>
+                          <Button variant="outline" onClick={() => void clearProviderKey(provider.key)}>
+                            Remove Key
+                          </Button>
+                        </>
+                      ) : null}
+                    </>
                   )}
                 </div>
               </CardFooter>

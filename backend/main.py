@@ -672,9 +672,18 @@ def upsert_provider_credential(workspace_id: UUID, provider: str, payload: Provi
         if api_key:
             credential.encrypted_api_key = encrypt_secret(api_key)
             merged_metadata["key_last4"] = api_key[-4:]
-        else:
+        elif payload.clear_secret:
             credential.encrypted_api_key = None
             merged_metadata.pop("key_last4", None)
+
+    if payload.clear_secret:
+        credential.encrypted_api_key = None
+        credential.secret_reference = None
+        merged_metadata.pop("key_last4", None)
+        if payload.is_default is None:
+            credential.is_default = False
+        if payload.is_enabled is None:
+            credential.is_enabled = False
 
     if payload.secret_reference is not None:
         credential.secret_reference = payload.secret_reference or None
@@ -686,6 +695,9 @@ def upsert_provider_credential(workspace_id: UUID, provider: str, payload: Provi
     if credential.is_default and not credential.is_enabled:
         raise HTTPException(status_code=400, detail="A default provider credential must stay enabled")
 
+    if credential.is_default and not (credential.encrypted_api_key or credential.secret_reference):
+        raise HTTPException(status_code=400, detail="A default provider credential must have a configured secret")
+
     credential.metadata_json = merged_metadata or None
 
     if credential.is_default:
@@ -695,6 +707,10 @@ def upsert_provider_credential(workspace_id: UUID, provider: str, payload: Provi
             db.add(setting)
         else:
             setting.value_json = {"provider": provider}
+    elif payload.clear_secret:
+        setting = get_workspace_setting(db, workspace_id, "default_provider")
+        if setting and (setting.value_json or {}).get("provider") == provider:
+            setting.value_json = {"provider": "openai"}
 
     db.commit()
     db.refresh(credential)

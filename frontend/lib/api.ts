@@ -359,6 +359,7 @@ export async function upsertProviderCredential(
     secret_reference?: string | null;
     is_default?: boolean;
     is_enabled?: boolean;
+    clear_secret?: boolean;
     metadata_json?: Record<string, unknown> | null;
   }
 ) {

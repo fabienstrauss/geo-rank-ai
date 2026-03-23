@@ -67,6 +67,7 @@ class ProviderCredentialUpsert(BaseModel):
     secret_reference: str | None = None
     is_default: bool | None = None
     is_enabled: bool | None = None
+    clear_secret: bool = False
     metadata_json: dict | None = None
 
 
