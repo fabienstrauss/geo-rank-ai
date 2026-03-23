@@ -37,9 +37,11 @@ from schemas import (
     ConnectorRead,
     ConnectorUpdate,
     DashboardRead,
+    LlmApiConnectorConfig,
     PromptListSummaryRead,
     RunListRead,
     RunListSummaryRead,
+    UiScraperConnectorConfig,
     PromptCreate,
     PromptListRead,
     PromptRead,
@@ -229,6 +231,24 @@ def build_run_base_query(
             )
         )
     return query
+
+
+def normalize_connector_payload(
+    *,
+    connector_type,
+    provider_key: str | None,
+    config_json: dict | None,
+):
+    if connector_type.value == "llm_api":
+        normalized = LlmApiConnectorConfig.model_validate(config_json or {}).model_dump()
+        resolved_provider = provider_key or normalized.get("provider")
+        if not resolved_provider:
+            raise HTTPException(status_code=422, detail="provider_key is required for llm_api connectors")
+        normalized["provider"] = resolved_provider
+        return resolved_provider, normalized
+
+    normalized = UiScraperConnectorConfig.model_validate(config_json or {}).model_dump()
+    return provider_key, normalized
 
 
 @app.get("/")
@@ -652,13 +672,18 @@ def list_connectors(workspace_id: UUID, db: DbSession):
 @app.post("/workspaces/{workspace_id}/connectors", response_model=ConnectorRead, status_code=201)
 def create_connector(workspace_id: UUID, payload: ConnectorCreate, db: DbSession):
     get_workspace_or_404(db, workspace_id)
+    provider_key, config_json = normalize_connector_payload(
+        connector_type=payload.connector_type,
+        provider_key=payload.provider_key,
+        config_json=payload.config_json,
+    )
     connector = Connector(
         workspace_id=workspace_id,
         name=payload.name,
         connector_type=payload.connector_type,
-        provider_key=payload.provider_key,
+        provider_key=provider_key,
         is_enabled=payload.is_enabled,
-        config_json=payload.config_json,
+        config_json=config_json,
     )
     db.add(connector)
     db.commit()
@@ -673,8 +698,19 @@ def update_connector(connector_id: UUID, payload: ConnectorUpdate, db: DbSession
         raise HTTPException(status_code=404, detail="Connector not found")
 
     updates = payload.model_dump(exclude_unset=True)
+    next_connector_type = updates.get("connector_type", connector.connector_type)
+    next_provider_key = updates.get("provider_key", connector.provider_key)
+    next_config_json = updates.get("config_json", connector.config_json)
+    provider_key, config_json = normalize_connector_payload(
+        connector_type=next_connector_type,
+        provider_key=next_provider_key,
+        config_json=next_config_json,
+    )
+
     for field, value in updates.items():
         setattr(connector, field, value)
+    connector.provider_key = provider_key
+    connector.config_json = config_json
 
     db.commit()
     db.refresh(connector)

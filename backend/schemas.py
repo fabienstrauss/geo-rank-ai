@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from models import (
     ConnectorHealth,
@@ -69,12 +70,45 @@ class ProviderCredentialUpsert(BaseModel):
     metadata_json: dict | None = None
 
 
+class LlmApiConnectorConfig(BaseModel):
+    provider: Literal["openai", "anthropic", "google"] | None = None
+    model: str | None = None
+    temperature: float = Field(default=0.2, ge=0, le=2)
+    max_tokens: int = Field(default=1200, ge=1, le=16384)
+    timeout_seconds: int = Field(default=60, ge=5, le=300)
+    retry_limit: int = Field(default=2, ge=0, le=10)
+
+
+class UiScraperConnectorConfig(BaseModel):
+    base_url: str | None = None
+    render_javascript: bool = True
+    timeout_seconds: int = Field(default=90, ge=5, le=300)
+    rate_limit_per_minute: int = Field(default=30, ge=1, le=600)
+    use_proxy: bool = False
+
+
 class ConnectorCreate(BaseModel):
     name: str
     connector_type: ConnectorType
     provider_key: str | None = None
     is_enabled: bool = True
     config_json: dict | None = None
+
+    @model_validator(mode="after")
+    def validate_config(self):
+        if self.connector_type == ConnectorType.LLM_API:
+            normalized = LlmApiConnectorConfig.model_validate(self.config_json or {}).model_dump()
+            provider = self.provider_key or normalized.get("provider")
+            if not provider:
+                raise ValueError("provider_key is required for llm_api connectors")
+            self.provider_key = provider
+            normalized["provider"] = provider
+            self.config_json = normalized
+            return self
+
+        normalized = UiScraperConnectorConfig.model_validate(self.config_json or {}).model_dump()
+        self.config_json = normalized
+        return self
 
 
 class ConnectorUpdate(BaseModel):
