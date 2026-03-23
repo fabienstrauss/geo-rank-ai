@@ -193,6 +193,14 @@ class RunSummaryRead(BaseModel):
     updated_at: datetime
 
 
+class ManualRunCreate(BaseModel):
+    connector_id: UUID | None = None
+    prompt_ids: list[UUID] | None = None
+    models: list[str] | None = None
+    run_type: RunType = RunType.PROMPT_ONLY
+    scope_description: str | None = None
+
+
 class RunListSummaryRead(BaseModel):
     total: int
     running: int
