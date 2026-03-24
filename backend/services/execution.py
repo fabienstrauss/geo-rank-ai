@@ -5,12 +5,14 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from models import (
+    CompetitorSnapshot,
     Connector,
     Prompt,
+    PromptMetricSnapshot,
     PromptStatus,
     ProviderCredential,
     QueueJob,
@@ -164,6 +166,89 @@ def _resolve_provider_api_key(db: Session, workspace_id: UUID, provider_key: str
     return decrypt_secret(credential.encrypted_api_key)
 
 
+def _clamp(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
+
+
+def _build_visibility_score(*, target_mentioned: bool, mentions_count: int, citation_count: int) -> float:
+    base = 18.0
+    if target_mentioned:
+        base += 42.0
+    base += min(mentions_count, 5) * 6.0
+    base += min(citation_count, 5) * 4.0
+    return round(_clamp(base, 0.0, 100.0), 1)
+
+
+def _upsert_prompt_snapshot(
+    db: Session,
+    *,
+    prompt: Prompt,
+    scrape_result: ScrapeResult,
+    citation_rows: list[CitationResult],
+    snapshot_at: datetime,
+) -> PromptMetricSnapshot:
+    visibility_score = _build_visibility_score(
+        target_mentioned=scrape_result.target_mentioned,
+        mentions_count=scrape_result.mentions_count,
+        citation_count=sum(citation.citation_count for citation in citation_rows),
+    )
+    snapshot = PromptMetricSnapshot(
+        workspace_id=prompt.workspace_id,
+        category_id=prompt.category_id,
+        prompt_id=prompt.id,
+        snapshot_at=snapshot_at,
+        visibility_score=visibility_score,
+        sentiment_score=scrape_result.sentiment_score,
+        mentions_count=scrape_result.mentions_count,
+        metadata_json={
+            "run_id": str(scrape_result.run_id),
+            "scrape_result_id": str(scrape_result.id),
+            "llm_provider": scrape_result.llm_provider,
+            "llm_model": scrape_result.llm_model,
+        },
+    )
+    db.add(snapshot)
+    return snapshot
+
+
+def _write_competitor_snapshots(
+    db: Session,
+    *,
+    prompt: Prompt,
+    scrape_result: ScrapeResult,
+    snapshot_at: datetime,
+) -> None:
+    brands = [prompt.target_brand, *scrape_result.competitors_mentioned]
+    unique_brands: list[str] = []
+    for brand in brands:
+        normalized = brand.strip()
+        if normalized and normalized not in unique_brands:
+            unique_brands.append(normalized)
+
+    if not unique_brands:
+        return
+
+    total_brands = len(unique_brands)
+    total_mentions = max(scrape_result.mentions_count, 1)
+    for index, brand in enumerate(unique_brands, start=1):
+        mention_weight = 1.0 if brand == prompt.target_brand and scrape_result.target_mentioned else 0.8
+        share = round((mention_weight / total_mentions) * 100, 1)
+        db.add(
+            CompetitorSnapshot(
+                workspace_id=prompt.workspace_id,
+                brand=brand,
+                snapshot_at=snapshot_at,
+                avg_rank=float(index),
+                share_of_voice=share if share > 0 else round(100 / total_brands, 1),
+                metadata_json={
+                    "run_id": str(scrape_result.run_id),
+                    "prompt_id": str(prompt.id),
+                    "llm_model": scrape_result.llm_model,
+                },
+            )
+        )
+
+
 def _update_run_status(db: Session, run: Run, *, status: RunStatus, message: str) -> None:
     run.status = status
     db.add(RunLog(run_id=run.id, level="info", message=message))
@@ -175,6 +260,33 @@ def _complete_run(db: Session, run: Run) -> RunDetailRead:
     if run.started_at:
         run.duration_seconds = int((run.completed_at - run.started_at).total_seconds())
     run.mentions_count = sum(result.mentions_count for result in run.scrape_results)
+    prompt_snapshot_rows = db.scalars(
+        select(PromptMetricSnapshot)
+        .where(PromptMetricSnapshot.prompt_id.in_(select(RunPrompt.prompt_id).where(RunPrompt.run_id == run.id)))
+        .order_by(PromptMetricSnapshot.snapshot_at.desc())
+    ).all()
+    current_snapshots = [row for row in prompt_snapshot_rows if (row.metadata_json or {}).get("run_id") == str(run.id)]
+    previous_snapshots_by_prompt: dict[UUID, PromptMetricSnapshot] = {}
+    for row in prompt_snapshot_rows:
+        if row.prompt_id is None or row.prompt_id in previous_snapshots_by_prompt:
+            continue
+        if (row.metadata_json or {}).get("run_id") == str(run.id):
+            continue
+        previous_snapshots_by_prompt[row.prompt_id] = row
+
+    if current_snapshots:
+        current_avg_visibility = sum((row.visibility_score or 0) for row in current_snapshots) / len(current_snapshots)
+        comparable_previous = [
+            previous_snapshots_by_prompt[row.prompt_id]
+            for row in current_snapshots
+            if row.prompt_id in previous_snapshots_by_prompt
+        ]
+        if comparable_previous:
+            previous_avg_visibility = sum((row.visibility_score or 0) for row in comparable_previous) / len(comparable_previous)
+            run.visibility_delta = round(current_avg_visibility - previous_avg_visibility, 1)
+        else:
+            run.visibility_delta = round(current_avg_visibility, 1)
+
     queued_or_running = any(job.status in {QueueJobStatus.QUEUED, QueueJobStatus.RUNNING} for job in run.queue_jobs)
     failed = any(job.status == QueueJobStatus.FAILED for job in run.queue_jobs)
     run.status = RunStatus.FAILED if failed and not queued_or_running else RunStatus.COMPLETED
@@ -266,8 +378,10 @@ def execute_run_now(db: Session, *, run_id: UUID) -> RunDetailRead:
             db.add(scrape_result)
             db.flush()
 
+            citation_rows: list[CitationResult] = []
             for citation in result.citations:
                 citation_row = citation if isinstance(citation, CitationResult) else CitationResult.model_validate(citation)
+                citation_rows.append(citation_row)
                 db.add(
                     SourceCitation(
                         scrape_result_id=scrape_result.id,
@@ -278,6 +392,20 @@ def execute_run_now(db: Session, *, run_id: UUID) -> RunDetailRead:
                         metadata_json=citation_row.metadata,
                     )
                 )
+
+            _upsert_prompt_snapshot(
+                db,
+                prompt=prompt,
+                scrape_result=scrape_result,
+                citation_rows=citation_rows,
+                snapshot_at=job.completed_at or datetime.now(timezone.utc),
+            )
+            _write_competitor_snapshots(
+                db,
+                prompt=prompt,
+                scrape_result=scrape_result,
+                snapshot_at=job.completed_at or datetime.now(timezone.utc),
+            )
 
             job.status = QueueJobStatus.COMPLETED
             job.completed_at = datetime.now(timezone.utc)
@@ -296,4 +424,5 @@ def execute_run_now(db: Session, *, run_id: UUID) -> RunDetailRead:
                 run_prompt.error_message = str(exc.detail)
             db.add(RunLog(run_id=run.id, level="error", message=f"Job {job.id} failed: {exc.detail}"))
 
+    db.flush()
     return _complete_run(db, run)
