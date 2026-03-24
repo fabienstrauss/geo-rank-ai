@@ -365,6 +365,29 @@ export async function getRunDetail(runId: string) {
   return api<RunDetail>(`/runs/${runId}`);
 }
 
+export async function createManualRun(
+  workspaceId: string,
+  payload?: {
+    connector_id?: string | null;
+    prompt_ids?: string[] | null;
+    models?: string[] | null;
+    run_type?: string;
+    scope_description?: string | null;
+  }
+) {
+  return api<RunDetail>(`/workspaces/${workspaceId}/runs/manual`, {
+    method: "POST",
+    body: JSON.stringify(payload ?? {}),
+  });
+}
+
+export async function executeRun(runId: string) {
+  return api<RunDetail>(`/runs/${runId}/execute`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
 export async function getSettings(workspaceId: string) {
   return api<WorkspaceSetting[]>(`/workspaces/${workspaceId}/settings`);
 }

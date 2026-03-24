@@ -1,6 +1,6 @@
 "use client";
 
-import { startTransition, useEffect, useState } from "react";
+import { startTransition, useCallback, useEffect, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -28,7 +28,21 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { ConnectorIncident, QueueJob, Run, RunDetail, RunList, Worker, getConnectorIncidents, getQueueJobs, getRunDetail, getRunsFiltered, getWorkers } from "@/lib/api";
+import {
+  ConnectorIncident,
+  QueueJob,
+  Run,
+  RunDetail,
+  RunList,
+  Worker,
+  createManualRun,
+  executeRun,
+  getConnectorIncidents,
+  getQueueJobs,
+  getRunDetail,
+  getRunsFiltered,
+  getWorkers,
+} from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const columnSeparatorClass = "border-r border-border/60";
@@ -78,37 +92,39 @@ export function RunsManager() {
   const [failures, setFailures] = useState<ConnectorIncident[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedRun, setSelectedRun] = useState<RunDetail | null>(null);
+  const [isStartingRun, setIsStartingRun] = useState(false);
+  const [runActionError, setRunActionError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    if (!activeWorkspace) return;
+    const requestOffset = workspaceId === activeWorkspace.id ? runPage.offset : 0;
+    const [runRows, workerRows, queueRows, incidentRows] = await Promise.all([
+      getRunsFiltered(activeWorkspace.id, {
+        statuses: selectedStatuses,
+        runTypes: selectedTypes,
+        search: query,
+        limit: pageSize,
+        offset: requestOffset,
+        sortBy,
+        sortOrder,
+      }),
+      getWorkers(),
+      getQueueJobs(activeWorkspace.id),
+      getConnectorIncidents(activeWorkspace.id),
+    ]);
+    startTransition(() => {
+      setWorkspaceId(activeWorkspace.id);
+      setRuns(runRows.items);
+      setRunPage(runRows);
+      setWorkers(workerRows);
+      setQueueJobs(queueRows);
+      setFailures(incidentRows);
+    });
+  }, [activeWorkspace, pageSize, query, runPage.offset, selectedStatuses, selectedTypes, sortBy, sortOrder, workspaceId]);
 
   useEffect(() => {
-    async function load() {
-      if (!activeWorkspace) return;
-      const requestOffset = workspaceId === activeWorkspace.id ? runPage.offset : 0;
-      const [runRows, workerRows, queueRows, incidentRows] = await Promise.all([
-        getRunsFiltered(activeWorkspace.id, {
-          statuses: selectedStatuses,
-          runTypes: selectedTypes,
-          search: query,
-          limit: pageSize,
-          offset: requestOffset,
-          sortBy,
-          sortOrder,
-        }),
-        getWorkers(),
-        getQueueJobs(activeWorkspace.id),
-        getConnectorIncidents(activeWorkspace.id),
-      ]);
-      startTransition(() => {
-        setWorkspaceId(activeWorkspace.id);
-        setRuns(runRows.items);
-        setRunPage(runRows);
-        setWorkers(workerRows);
-        setQueueJobs(queueRows);
-        setFailures(incidentRows);
-      });
-    }
-
     void load();
-  }, [activeWorkspace, pageSize, query, runPage.offset, selectedStatuses, selectedTypes, sortBy, sortOrder, workspaceId]);
+  }, [load]);
 
   useEffect(() => {
     if (!selectedRunId) return;
@@ -127,11 +143,40 @@ export function RunsManager() {
   const typeOptions = ["full_eval", "prompt_only", "reingest", "backfill"];
   const hasRunsData = runs.length > 0;
 
+  const handleStartRun = async () => {
+    if (!activeWorkspace || isStartingRun) return;
+    setIsStartingRun(true);
+    setRunActionError(null);
+    try {
+      const createdRun = await createManualRun(activeWorkspace.id, {
+        run_type: "prompt_only",
+        scope_description: "Manual run from Runs page",
+      });
+      const executedRun = await executeRun(createdRun.id);
+      setSelectedRunId(executedRun.id);
+      setSelectedRun(executedRun);
+      await load();
+    } catch (error) {
+      setRunActionError(error instanceof Error ? error.message : "Failed to start run");
+    } finally {
+      setIsStartingRun(false);
+    }
+  };
+
   return (
     <div className="space-y-6 pb-8">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Data & Runs</h1>
-        <p className="mt-1 text-muted-foreground">Monitor evaluation history, ingestion jobs, and operational issues.</p>
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">Data & Runs</h1>
+          <p className="mt-1 text-muted-foreground">Monitor evaluation history, ingestion jobs, and operational issues.</p>
+        </div>
+        <div className="flex flex-col items-start gap-2">
+          <Button onClick={() => void handleStartRun()} disabled={isStartingRun || !activeWorkspace}>
+            <PlayCircle className="h-4 w-4" />
+            {isStartingRun ? "Running..." : "Run Active Prompts"}
+          </Button>
+          {runActionError ? <p className="text-sm text-rose-600">{runActionError}</p> : null}
+        </div>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
