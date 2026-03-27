@@ -43,6 +43,7 @@ import {
   getRunsFiltered,
   getWorkers,
 } from "@/lib/api";
+import { emitDataUpdated } from "@/lib/app-events";
 import { cn } from "@/lib/utils";
 
 const columnSeparatorClass = "border-r border-border/60";
@@ -156,6 +157,7 @@ export function RunsManager() {
       setSelectedRunId(executedRun.id);
       setSelectedRun(executedRun);
       await load();
+      emitDataUpdated();
     } catch (error) {
       setRunActionError(error instanceof Error ? error.message : "Failed to start run");
     } finally {

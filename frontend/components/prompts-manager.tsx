@@ -32,6 +32,7 @@ import {
   updateCategory,
   updatePrompt,
 } from "@/lib/api";
+import { subscribeToDataUpdated } from "@/lib/app-events";
 import { cn } from "@/lib/utils";
 
 type ModelOption = "GPT-5" | "Claude" | "Gemini" | "Perplexity";
@@ -387,6 +388,8 @@ export function PromptsManager() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => subscribeToDataUpdated(() => void load()), [load]);
 
   const groupedPrompts = useMemo(() => {
     return categories
