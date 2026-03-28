@@ -83,6 +83,7 @@ function normalizeRunErrorMessage(message: string) {
 
 export function RunsManager() {
   const { activeWorkspace } = useWorkspace();
+  const pollIntervalMs = 4000;
   const pageSize = 10;
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -147,6 +148,25 @@ export function RunsManager() {
   const statusOptions = ["completed", "running", "queued", "failed"];
   const typeOptions = ["full_eval", "prompt_only", "reingest", "backfill"];
   const hasRunsData = runs.length > 0;
+  const shouldPoll =
+    isStartingRun ||
+    kpis.running > 0 ||
+    queueJobs.some((job) => job.status === "queued" || job.status === "running") ||
+    selectedRun?.status === "queued" ||
+    selectedRun?.status === "running";
+
+  useEffect(() => {
+    if (!shouldPoll) return;
+
+    const intervalId = window.setInterval(() => {
+      void load();
+      if (selectedRunId) {
+        void getRunDetail(selectedRunId).then(setSelectedRun);
+      }
+    }, pollIntervalMs);
+
+    return () => window.clearInterval(intervalId);
+  }, [load, pollIntervalMs, selectedRun?.status, selectedRunId, shouldPoll]);
 
   const handleStartRun = async () => {
     if (!activeWorkspace || isStartingRun) return;
@@ -183,6 +203,7 @@ export function RunsManager() {
             <PlayCircle className="h-4 w-4" />
             {isStartingRun ? "Running..." : "Run Active Prompts"}
           </Button>
+          {shouldPoll ? <p className="text-xs text-muted-foreground">Auto-refreshing run state...</p> : null}
           {runActionError ? (
             <div className="max-w-lg rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
               {runActionError}
