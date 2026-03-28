@@ -33,6 +33,22 @@ services:
       db:
         condition: service_healthy
 
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    command: ["python", "dev_worker.py"]
+    volumes:
+      - ./backend:/app
+    environment:
+      - ENV=development
+      - DATABASE_URL=postgresql+psycopg2://georank:georank@db:5432/georank_db
+      - APP_ENCRYPTION_KEY=5mD5Ne8kTuKxvQ8mqA2x4zvJ9P4Qx0A2K4JYd2xM8Fg=
+      - DEV_WORKER_POLL_INTERVAL=3
+    depends_on:
+      db:
+        condition: service_healthy
+
   frontend:
     build:
       context: ./frontend
