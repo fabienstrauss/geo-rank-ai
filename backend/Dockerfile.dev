@@ -5,6 +5,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+COPY external_plugins /app/external_plugins
+RUN find /app/external_plugins -mindepth 1 -maxdepth 1 -type d -exec pip install --no-cache-dir -e {} \;
+
 COPY start-dev.sh /app/start-dev.sh
 RUN chmod +x /app/start-dev.sh
 
