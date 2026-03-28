@@ -193,13 +193,47 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
 
 
-def _build_visibility_score(*, target_mentioned: bool, mentions_count: int, citation_count: int) -> float:
-    base = 18.0
+def _normalize_sentiment(sentiment_score: float | None) -> float:
+    if sentiment_score is None:
+        return 50.0
+    return _clamp(sentiment_score, 0.0, 100.0)
+
+
+def _build_visibility_score(
+    *,
+    target_mentioned: bool,
+    mentions_count: int,
+    citation_count: int,
+    competitor_count: int,
+    sentiment_score: float | None,
+) -> float:
+    base = 12.0
     if target_mentioned:
-        base += 42.0
-    base += min(mentions_count, 5) * 6.0
-    base += min(citation_count, 5) * 4.0
+        base += 34.0
+    base += min(mentions_count, 6) * 5.5
+    base += min(citation_count, 6) * 4.5
+    base += (_normalize_sentiment(sentiment_score) - 50.0) * 0.18
+    base -= min(competitor_count, 4) * 3.0
     return round(_clamp(base, 0.0, 100.0), 1)
+
+
+def _build_brand_weights(prompt: Prompt, scrape_result: ScrapeResult) -> dict[str, float]:
+    weights: dict[str, float] = {}
+    target_brand = prompt.target_brand.strip()
+    if target_brand:
+        target_weight = 1.2 if scrape_result.target_mentioned else 0.35
+        target_weight += min(scrape_result.mentions_count, 5) * 0.2
+        target_weight += max(0.0, (_normalize_sentiment(scrape_result.sentiment_score) - 50.0) / 100.0)
+        weights[target_brand] = target_weight
+
+    for index, brand in enumerate(scrape_result.competitors_mentioned, start=1):
+        normalized = brand.strip()
+        if not normalized:
+            continue
+        competitor_weight = max(0.25, 0.95 - (index - 1) * 0.18)
+        weights[normalized] = max(weights.get(normalized, 0.0), competitor_weight)
+
+    return weights
 
 
 def _upsert_prompt_snapshot(
@@ -214,6 +248,8 @@ def _upsert_prompt_snapshot(
         target_mentioned=scrape_result.target_mentioned,
         mentions_count=scrape_result.mentions_count,
         citation_count=sum(citation.citation_count for citation in citation_rows),
+        competitor_count=len(scrape_result.competitors_mentioned),
+        sentiment_score=scrape_result.sentiment_score,
     )
     snapshot = PromptMetricSnapshot(
         workspace_id=prompt.workspace_id,
@@ -241,32 +277,26 @@ def _write_competitor_snapshots(
     scrape_result: ScrapeResult,
     snapshot_at: datetime,
 ) -> None:
-    brands = [prompt.target_brand, *scrape_result.competitors_mentioned]
-    unique_brands: list[str] = []
-    for brand in brands:
-        normalized = brand.strip()
-        if normalized and normalized not in unique_brands:
-            unique_brands.append(normalized)
-
-    if not unique_brands:
+    brand_weights = _build_brand_weights(prompt, scrape_result)
+    if not brand_weights:
         return
 
-    total_brands = len(unique_brands)
-    total_mentions = max(scrape_result.mentions_count, 1)
-    for index, brand in enumerate(unique_brands, start=1):
-        mention_weight = 1.0 if brand == prompt.target_brand and scrape_result.target_mentioned else 0.8
-        share = round((mention_weight / total_mentions) * 100, 1)
+    sorted_brands = sorted(brand_weights.items(), key=lambda item: item[1], reverse=True)
+    total_weight = sum(weight for _, weight in sorted_brands) or 1.0
+    for index, (brand, weight) in enumerate(sorted_brands, start=1):
+        share = round((weight / total_weight) * 100, 1)
         db.add(
             CompetitorSnapshot(
                 workspace_id=prompt.workspace_id,
                 brand=brand,
                 snapshot_at=snapshot_at,
                 avg_rank=float(index),
-                share_of_voice=share if share > 0 else round(100 / total_brands, 1),
+                share_of_voice=share,
                 metadata_json={
                     "run_id": str(scrape_result.run_id),
                     "prompt_id": str(prompt.id),
                     "llm_model": scrape_result.llm_model,
+                    "weight": round(weight, 3),
                 },
             )
         )
