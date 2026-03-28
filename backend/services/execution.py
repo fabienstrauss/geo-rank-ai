@@ -43,7 +43,12 @@ def _resolve_prompt_scope(db: Session, workspace_id: UUID, payload: ManualRunCre
 
     prompts = db.scalars(prompt_query.order_by(Prompt.created_at.asc())).all()
     if not prompts:
-        raise HTTPException(status_code=400, detail="No prompts available for this run")
+        if payload.prompt_ids:
+            raise HTTPException(status_code=400, detail="The selected prompts could not be found in this workspace")
+        raise HTTPException(
+            status_code=400,
+            detail="No active prompts are available for this run. Activate at least one prompt in the Prompts page first.",
+        )
     return prompts
 
 
@@ -56,15 +61,27 @@ def _resolve_connector(db: Session, workspace_id: UUID, payload: ManualRunCreate
             connector_id = UUID(str(default_connector_id))
 
     if connector_id is None:
-        raise HTTPException(status_code=400, detail="No connector selected for this run")
+        raise HTTPException(
+            status_code=400,
+            detail="No connector is configured for this run. Set a default connector in Settings or choose one explicitly.",
+        )
 
     connector = db.get(Connector, connector_id)
     if not connector or connector.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="Connector not found for this workspace")
     if not connector.is_enabled:
-        raise HTTPException(status_code=400, detail="Connector must be enabled before running prompts")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Connector '{connector.name}' is disabled. Enable it in Settings before running prompts.",
+        )
 
-    get_scraper_plugin(connector.implementation_key)
+    try:
+        get_scraper_plugin(connector.implementation_key)
+    except HTTPException as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Connector '{connector.name}' points to an unavailable scraper implementation: '{connector.implementation_key}'.",
+        ) from exc
     return connector
 
 
@@ -78,7 +95,10 @@ def _collect_models(prompts: Iterable[Prompt], payload: ManualRunCreate) -> list
             if model not in models:
                 models.append(model)
     if not models:
-        raise HTTPException(status_code=400, detail="No models available for this run")
+        raise HTTPException(
+            status_code=400,
+            detail="No models are configured for the selected prompts. Add at least one model in the Prompts page first.",
+        )
     return models
 
 
@@ -162,7 +182,10 @@ def _resolve_provider_api_key(db: Session, workspace_id: UUID, provider_key: str
         )
     )
     if not credential or not credential.is_enabled or not credential.encrypted_api_key:
-        raise HTTPException(status_code=400, detail=f"No enabled API credential found for provider '{provider_key}'")
+        raise HTTPException(
+            status_code=400,
+            detail=f"No enabled API key is configured for provider '{provider_key}'. Add it in Settings before running this connector.",
+        )
     return decrypt_secret(credential.encrypted_api_key)
 
 
@@ -316,11 +339,14 @@ def execute_run_now(db: Session, *, run_id: UUID) -> RunDetailRead:
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     if run.status not in {RunStatus.QUEUED, RunStatus.FAILED}:
-        raise HTTPException(status_code=400, detail="Only queued or failed runs can be executed")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Run '{run.id}' is already '{run.status.value}'. Only queued or failed runs can be executed.",
+        )
 
     queued_jobs = [job for job in run.queue_jobs if job.status == QueueJobStatus.QUEUED]
     if not queued_jobs:
-        raise HTTPException(status_code=400, detail="Run has no queued jobs to execute")
+        raise HTTPException(status_code=400, detail="This run has no queued jobs left to execute.")
 
     run.status = RunStatus.RUNNING
     run.started_at = datetime.now(timezone.utc)

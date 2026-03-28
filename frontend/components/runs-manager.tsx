@@ -77,6 +77,10 @@ function formatDuration(seconds?: number | null) {
   return `${minutes}m ${remainder}s`;
 }
 
+function normalizeRunErrorMessage(message: string) {
+  return message.replace(/^"+|"+$/g, "").trim();
+}
+
 export function RunsManager() {
   const { activeWorkspace } = useWorkspace();
   const pageSize = 10;
@@ -159,7 +163,9 @@ export function RunsManager() {
       await load();
       emitDataUpdated();
     } catch (error) {
-      setRunActionError(error instanceof Error ? error.message : "Failed to start run");
+      setRunActionError(
+        error instanceof Error ? normalizeRunErrorMessage(error.message) : "Failed to start run"
+      );
     } finally {
       setIsStartingRun(false);
     }
@@ -177,7 +183,11 @@ export function RunsManager() {
             <PlayCircle className="h-4 w-4" />
             {isStartingRun ? "Running..." : "Run Active Prompts"}
           </Button>
-          {runActionError ? <p className="text-sm text-rose-600">{runActionError}</p> : null}
+          {runActionError ? (
+            <div className="max-w-lg rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+              {runActionError}
+            </div>
+          ) : null}
         </div>
       </div>
 
