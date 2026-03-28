@@ -39,6 +39,7 @@ def list_available_scraper_plugins():
             name=plugin.name,
             description=plugin.description,
             scraper_type=plugin.scraper_type,
+            is_builtin=plugin.is_builtin,
             provider_key=plugin.provider_key,
             capabilities=plugin.capabilities,
             config_schema=plugin.config_schema(),

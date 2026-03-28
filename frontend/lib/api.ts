@@ -149,6 +149,7 @@ export type ScraperPlugin = {
   name: string;
   description: string;
   scraper_type: "llm_api" | "ui_scraper";
+  is_builtin: boolean;
   provider_key?: string | null;
   capabilities: string[];
   config_schema: Record<string, unknown>;

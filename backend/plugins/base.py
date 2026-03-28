@@ -52,6 +52,7 @@ class ScraperPluginDefinition:
     description: str
     scraper_type: ConnectorType
     config_model: type[BaseModel]
+    is_builtin: bool = True
     provider_key: str | None = None
     capabilities: list[str] = field(default_factory=list)
     runner_cls: type[ScraperRunner] | None = None

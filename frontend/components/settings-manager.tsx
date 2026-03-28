@@ -87,6 +87,11 @@ function defaultConfigForPlugin(plugin: ScraperPlugin | undefined): Record<strin
   return defaultConnectorConfig(plugin.scraper_type, plugin.provider_key as ProviderKey | undefined);
 }
 
+function pluginLabel(plugin: ScraperPlugin | undefined) {
+  if (!plugin) return "Unknown";
+  return plugin.is_builtin ? "Built-in" : "External";
+}
+
 function normalizeConnectorForState(connector: {
   id: string;
   name: string;
@@ -475,13 +480,13 @@ export function SettingsManager() {
               >
                 {scraperPlugins.map((plugin) => (
                   <option key={plugin.key} value={plugin.key}>
-                    {plugin.name}
+                    {plugin.name} ({plugin.is_builtin ? "Built-in" : "External"})
                   </option>
                 ))}
               </select>
               <div className="flex h-9 items-center rounded-md border border-input bg-background px-3 text-sm text-muted-foreground">
                 {selectedNewPlugin
-                  ? `${selectedNewPlugin.scraper_type === "ui_scraper" ? "UI scraper" : "LLM API"}${selectedNewPlugin.provider_key ? ` · ${providers.find((provider) => provider.key === selectedNewPlugin.provider_key)?.label ?? selectedNewPlugin.provider_key}` : ""}`
+                  ? `${pluginLabel(selectedNewPlugin)} · ${selectedNewPlugin.scraper_type === "ui_scraper" ? "UI scraper" : "LLM API"}${selectedNewPlugin.provider_key ? ` · ${providers.find((provider) => provider.key === selectedNewPlugin.provider_key)?.label ?? selectedNewPlugin.provider_key}` : ""}`
                   : "No implementation"}
               </div>
               <Button onClick={() => void addConnector()}>Add Connector</Button>
@@ -525,14 +530,19 @@ export function SettingsManager() {
                     >
                       {scraperPlugins.map((plugin) => (
                         <option key={plugin.key} value={plugin.key}>
-                          {plugin.name}
+                          {plugin.name} ({plugin.is_builtin ? "Built-in" : "External"})
                         </option>
                       ))}
                     </select>
                     <div className="flex h-9 items-center rounded-md border border-input bg-background px-3 text-sm text-muted-foreground">
-                      {connector.connector_type === "llm_api"
-                        ? providers.find((provider) => provider.key === connector.provider_key)?.label ?? connector.provider_key ?? "LLM API"
-                        : "UI scraper"}
+                      {(() => {
+                        const plugin = scraperPlugins.find((item) => item.key === connector.implementation_key);
+                        const modeLabel =
+                          connector.connector_type === "llm_api"
+                            ? providers.find((provider) => provider.key === connector.provider_key)?.label ?? connector.provider_key ?? "LLM API"
+                            : "UI scraper";
+                        return `${pluginLabel(plugin)} · ${modeLabel}`;
+                      })()}
                     </div>
                     <Button
                       variant={connector.is_enabled ? "default" : "outline"}

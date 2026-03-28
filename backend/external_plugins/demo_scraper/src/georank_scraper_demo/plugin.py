@@ -47,6 +47,7 @@ def get_plugin() -> ScraperPluginDefinition:
         description="Example third-party scraper discovered through Python entry points.",
         scraper_type=ConnectorType.UI_SCRAPER,
         config_model=DemoScraperConfig,
+        is_builtin=False,
         capabilities=["demo", "local-testing", "citations"],
         runner_cls=DemoExternalScraper,
     )

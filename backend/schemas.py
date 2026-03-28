@@ -111,6 +111,7 @@ class ScraperPluginRead(BaseModel):
     name: str
     description: str
     scraper_type: ConnectorType
+    is_builtin: bool
     provider_key: str | None
     capabilities: list[str]
     config_schema: dict
