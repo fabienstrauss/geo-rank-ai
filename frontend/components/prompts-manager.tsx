@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, startTransition, useCallback, useEffect, useMemo, useState } from "react";
-import { ChevronRight, FolderPen, MoreHorizontal, Plus, Search } from "lucide-react";
+import { ChevronRight, FolderPen, MoreHorizontal, PlayCircle, Plus, Search } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { useWorkspace } from "@/components/workspace-provider";
@@ -22,17 +22,19 @@ import {
   PromptList,
   PromptCategory,
   PromptStatus,
+  createManualRun,
   createCategory,
   createPrompt,
   deleteCategory,
   deletePrompt,
+  executeRun,
   getCategories,
   getPromptsFiltered,
   getSettings,
   updateCategory,
   updatePrompt,
 } from "@/lib/api";
-import { subscribeToDataUpdated } from "@/lib/app-events";
+import { emitDataUpdated, subscribeToDataUpdated } from "@/lib/app-events";
 import { cn } from "@/lib/utils";
 
 type ModelOption = "GPT-5" | "Claude" | "Gemini" | "Perplexity";
@@ -62,6 +64,10 @@ function formatStatus(status: PromptStatus) {
 function formatLastRun(value?: string | null) {
   if (!value) return "Not run yet";
   return new Date(value).toLocaleString();
+}
+
+function normalizeRunErrorMessage(message: string) {
+  return message.replace(/^"+|"+$/g, "").trim();
 }
 
 function CategoryManagerModal({
@@ -355,6 +361,8 @@ export function PromptsManager() {
   const [editingPromptId, setEditingPromptId] = useState<string | null>(null);
   const [form, setForm] = useState<PromptForm>(emptyForm);
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
+  const [isRunning, setIsRunning] = useState(false);
+  const [runActionError, setRunActionError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!activeWorkspace) return;
@@ -464,6 +472,26 @@ export function PromptsManager() {
     await load();
   };
 
+  const triggerRun = async (promptIds?: string[], scopeDescription?: string) => {
+    if (!workspaceId || isRunning) return;
+    setIsRunning(true);
+    setRunActionError(null);
+    try {
+      const createdRun = await createManualRun(workspaceId, {
+        prompt_ids: promptIds ?? null,
+        run_type: "prompt_only",
+        scope_description: scopeDescription ?? "Manual run from Prompts page",
+      });
+      await executeRun(createdRun.id);
+      await load();
+      emitDataUpdated();
+    } catch (error) {
+      setRunActionError(error instanceof Error ? normalizeRunErrorMessage(error.message) : "Failed to start run");
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
@@ -471,10 +499,23 @@ export function PromptsManager() {
           <h1 className="text-3xl font-bold tracking-tight">Prompts</h1>
           <p className="mt-1 text-muted-foreground">Organize tracked prompts by category and compare how they perform across models.</p>
         </div>
-        <Button className="flex items-center gap-2" onClick={openCreateModal}>
-          <Plus className="h-4 w-4" />
-          Add Prompt
-        </Button>
+        <div className="flex flex-col items-start gap-2 md:items-end">
+          <div className="flex gap-2">
+            <Button variant="outline" className="flex items-center gap-2" disabled={isRunning} onClick={() => void triggerRun(undefined, "Manual run from Prompts page")}>
+              <PlayCircle className="h-4 w-4" />
+              {isRunning ? "Running..." : "Run Active Prompts"}
+            </Button>
+            <Button className="flex items-center gap-2" onClick={openCreateModal}>
+              <Plus className="h-4 w-4" />
+              Add Prompt
+            </Button>
+          </div>
+          {runActionError ? (
+            <div className="max-w-lg rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+              {runActionError}
+            </div>
+          ) : null}
+        </div>
       </div>
 
       <Card>
@@ -661,6 +702,9 @@ export function PromptsManager() {
                                   </DropdownMenuTrigger>
                                   <DropdownMenuContent align="end">
                                     <DropdownMenuItem onClick={() => openEditModal(prompt)}>Edit prompt</DropdownMenuItem>
+                                    <DropdownMenuItem onClick={() => void triggerRun([prompt.id], `Manual run for prompt ${prompt.id}`)}>
+                                      Run prompt
+                                    </DropdownMenuItem>
                                     <DropdownMenuItem
                                       onClick={async () => {
                                         await createPrompt(workspaceId!, {
