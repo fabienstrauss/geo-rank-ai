@@ -343,6 +343,19 @@ class QueueJobRead(BaseModel):
     completed_at: datetime | None
 
 
+class WorkerProcessRequest(BaseModel):
+    limit: int = Field(default=1, ge=1, le=25)
+
+
+class WorkerProcessResultRead(BaseModel):
+    worker_id: UUID
+    processed_job_ids: list[UUID]
+    completed_job_ids: list[UUID]
+    failed_job_ids: list[UUID]
+    completed_run_ids: list[UUID]
+    remaining_queue_depth: int
+
+
 class DashboardStatRead(BaseModel):
     label: str
     value: float | int | str

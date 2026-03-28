@@ -25,10 +25,12 @@ from models import (
     RunType,
     ScrapeResult,
     SourceCitation,
+    Worker,
+    WorkerStatus,
 )
 from plugins.base import CitationResult, ScraperInput
 from plugins.registry import build_scraper_runner, get_scraper_plugin
-from schemas import ManualRunCreate, RunDetailRead
+from schemas import ManualRunCreate, RunDetailRead, WorkerProcessResultRead
 from security import decrypt_secret
 from services.read_models import get_run_or_404
 from services.settings import get_workspace_setting
@@ -308,6 +310,16 @@ def _update_run_status(db: Session, run: Run, *, status: RunStatus, message: str
     db.add(RunStepEvent(run_id=run.id, step_name=status.value, status=QueueJobStatus(status.value), message=message))
 
 
+def _ensure_run_running(db: Session, run: Run, *, message: str) -> None:
+    if run.status == RunStatus.RUNNING:
+        return
+    run.status = RunStatus.RUNNING
+    if run.started_at is None:
+        run.started_at = datetime.now(timezone.utc)
+    db.add(RunLog(run_id=run.id, level="info", message=message))
+    db.add(RunStepEvent(run_id=run.id, step_name="running", status=QueueJobStatus.RUNNING, message=message))
+
+
 def _complete_run(db: Session, run: Run) -> RunDetailRead:
     run.completed_at = datetime.now(timezone.utc)
     if run.started_at:
@@ -378,107 +390,203 @@ def execute_run_now(db: Session, *, run_id: UUID) -> RunDetailRead:
     if not queued_jobs:
         raise HTTPException(status_code=400, detail="This run has no queued jobs left to execute.")
 
-    run.status = RunStatus.RUNNING
-    run.started_at = datetime.now(timezone.utc)
-    db.add(RunLog(run_id=run.id, level="info", message=f"Starting synchronous execution for {len(queued_jobs)} queued job(s)"))
-    db.add(RunStepEvent(run_id=run.id, step_name="running", status=QueueJobStatus.RUNNING, message="Processing queued jobs"))
+    _ensure_run_running(db, run, message=f"Starting synchronous execution for {len(queued_jobs)} queued job(s)")
     db.flush()
 
-    run_prompt_by_id = {str(item.id): item for item in run.run_prompts}
-
     for job in queued_jobs:
-        connector = job.connector or (db.get(Connector, job.connector_id) if job.connector_id else None)
-        prompt = db.get(Prompt, job.prompt_id) if job.prompt_id else None
-        if connector is None or prompt is None:
-            job.status = QueueJobStatus.FAILED
-            job.error_message = "Missing connector or prompt for queued job"
-            continue
-
-        run_prompt = run_prompt_by_id.get(str((job.payload_json or {}).get("run_prompt_id")))
-        job.status = QueueJobStatus.RUNNING
-        job.started_at = datetime.now(timezone.utc)
-        if run_prompt:
-            run_prompt.status = QueueJobStatus.RUNNING
-
-        try:
-            runner = build_scraper_runner(connector.implementation_key)
-            result = runner.run(
-                ScraperInput(
-                    workspace_id=run.workspace_id,
-                    connector_id=connector.id,
-                    prompt_id=prompt.id,
-                    run_id=run.id,
-                    provider_key=connector.provider_key,
-                    provider_api_key=_resolve_provider_api_key(db, run.workspace_id, connector.provider_key),
-                    model=str((job.payload_json or {}).get("model") or ""),
-                    prompt_text=prompt.prompt_text,
-                    target_brand=prompt.target_brand,
-                    expected_competitors=prompt.expected_competitors,
-                    config=connector.config_json or {},
-                )
-            )
-            scrape_result = ScrapeResult(
-                run_id=run.id,
-                prompt_id=prompt.id,
-                run_prompt_id=run_prompt.id if run_prompt else None,
-                llm_provider=connector.provider_key or connector.implementation_key,
-                llm_model=str((job.payload_json or {}).get("model") or ""),
-                raw_output=result.raw_output,
-                target_mentioned=result.target_mentioned,
-                competitors_mentioned=result.competitors_mentioned,
-                sentiment_score=result.sentiment_score,
-                mentions_count=result.mentions_count,
-                citations=[citation.model_dump() if isinstance(citation, CitationResult) else dict(citation) for citation in result.citations],
-                sources=[citation.model_dump() if isinstance(citation, CitationResult) else dict(citation) for citation in result.citations],
-            )
-            db.add(scrape_result)
-            db.flush()
-
-            citation_rows: list[CitationResult] = []
-            for citation in result.citations:
-                citation_row = citation if isinstance(citation, CitationResult) else CitationResult.model_validate(citation)
-                citation_rows.append(citation_row)
-                db.add(
-                    SourceCitation(
-                        scrape_result_id=scrape_result.id,
-                        source_type=citation_row.source_type,
-                        domain=citation_row.domain,
-                        url=citation_row.url,
-                        citation_count=citation_row.citation_count,
-                        metadata_json=citation_row.metadata,
-                    )
-                )
-
-            _upsert_prompt_snapshot(
-                db,
-                prompt=prompt,
-                scrape_result=scrape_result,
-                citation_rows=citation_rows,
-                snapshot_at=job.completed_at or datetime.now(timezone.utc),
-            )
-            _write_competitor_snapshots(
-                db,
-                prompt=prompt,
-                scrape_result=scrape_result,
-                snapshot_at=job.completed_at or datetime.now(timezone.utc),
-            )
-
-            job.status = QueueJobStatus.COMPLETED
-            job.completed_at = datetime.now(timezone.utc)
-            job.error_message = None
-            if run_prompt:
-                run_prompt.status = QueueJobStatus.COMPLETED
-                run_prompt.mentions_count = result.mentions_count
-                run_prompt.error_message = None
-            db.add(RunLog(run_id=run.id, level="info", message=f"Completed prompt '{prompt.id}' for model '{scrape_result.llm_model}'"))
-        except HTTPException as exc:
-            job.status = QueueJobStatus.FAILED
-            job.completed_at = datetime.now(timezone.utc)
-            job.error_message = str(exc.detail)
-            if run_prompt:
-                run_prompt.status = QueueJobStatus.FAILED
-                run_prompt.error_message = str(exc.detail)
-            db.add(RunLog(run_id=run.id, level="error", message=f"Job {job.id} failed: {exc.detail}"))
+        _process_queue_job(db, job)
 
     db.flush()
     return _complete_run(db, run)
+
+
+def _process_queue_job(db: Session, job: QueueJob, *, worker: Worker | None = None) -> QueueJobStatus:
+    connector = job.connector or (db.get(Connector, job.connector_id) if job.connector_id else None)
+    prompt = db.get(Prompt, job.prompt_id) if job.prompt_id else None
+    run = db.get(Run, job.run_id) if job.run_id else None
+    run_prompt_id = str((job.payload_json or {}).get("run_prompt_id") or "")
+    run_prompt = db.get(RunPrompt, UUID(run_prompt_id)) if run_prompt_id else None
+
+    if connector is None or prompt is None or run is None:
+        job.status = QueueJobStatus.FAILED
+        job.completed_at = datetime.now(timezone.utc)
+        job.error_message = "Missing connector, prompt, or run for queued job"
+        return job.status
+
+    _ensure_run_running(
+        db,
+        run,
+        message=f"{'Worker ' + worker.worker_name if worker else 'Executor'} processing queued jobs for run '{run.id}'",
+    )
+    job.status = QueueJobStatus.RUNNING
+    job.started_at = datetime.now(timezone.utc)
+    if worker:
+        job.worker_id = worker.id
+        worker.status = WorkerStatus.BUSY
+        worker.current_job = f"Queue job {job.id}"
+        worker.last_heartbeat_at = job.started_at
+    if run_prompt:
+        run_prompt.status = QueueJobStatus.RUNNING
+
+    try:
+        runner = build_scraper_runner(connector.implementation_key)
+        result = runner.run(
+            ScraperInput(
+                workspace_id=run.workspace_id,
+                connector_id=connector.id,
+                prompt_id=prompt.id,
+                run_id=run.id,
+                provider_key=connector.provider_key,
+                provider_api_key=_resolve_provider_api_key(db, run.workspace_id, connector.provider_key),
+                model=str((job.payload_json or {}).get("model") or ""),
+                prompt_text=prompt.prompt_text,
+                target_brand=prompt.target_brand,
+                expected_competitors=prompt.expected_competitors,
+                config=connector.config_json or {},
+            )
+        )
+        scrape_result = ScrapeResult(
+            run_id=run.id,
+            prompt_id=prompt.id,
+            run_prompt_id=run_prompt.id if run_prompt else None,
+            llm_provider=connector.provider_key or connector.implementation_key,
+            llm_model=str((job.payload_json or {}).get("model") or ""),
+            raw_output=result.raw_output,
+            target_mentioned=result.target_mentioned,
+            competitors_mentioned=result.competitors_mentioned,
+            sentiment_score=result.sentiment_score,
+            mentions_count=result.mentions_count,
+            citations=[citation.model_dump() if isinstance(citation, CitationResult) else dict(citation) for citation in result.citations],
+            sources=[citation.model_dump() if isinstance(citation, CitationResult) else dict(citation) for citation in result.citations],
+        )
+        db.add(scrape_result)
+        db.flush()
+
+        citation_rows: list[CitationResult] = []
+        for citation in result.citations:
+            citation_row = citation if isinstance(citation, CitationResult) else CitationResult.model_validate(citation)
+            citation_rows.append(citation_row)
+            db.add(
+                SourceCitation(
+                    scrape_result_id=scrape_result.id,
+                    source_type=citation_row.source_type,
+                    domain=citation_row.domain,
+                    url=citation_row.url,
+                    citation_count=citation_row.citation_count,
+                    metadata_json=citation_row.metadata,
+                )
+            )
+
+        completed_at = datetime.now(timezone.utc)
+        _upsert_prompt_snapshot(
+            db,
+            prompt=prompt,
+            scrape_result=scrape_result,
+            citation_rows=citation_rows,
+            snapshot_at=completed_at,
+        )
+        _write_competitor_snapshots(
+            db,
+            prompt=prompt,
+            scrape_result=scrape_result,
+            snapshot_at=completed_at,
+        )
+
+        job.status = QueueJobStatus.COMPLETED
+        job.completed_at = completed_at
+        job.error_message = None
+        if run_prompt:
+            run_prompt.status = QueueJobStatus.COMPLETED
+            run_prompt.mentions_count = result.mentions_count
+            run_prompt.error_message = None
+        db.add(RunLog(run_id=run.id, level="info", message=f"Completed prompt '{prompt.id}' for model '{scrape_result.llm_model}'"))
+    except HTTPException as exc:
+        job.status = QueueJobStatus.FAILED
+        job.completed_at = datetime.now(timezone.utc)
+        job.error_message = str(exc.detail)
+        if run_prompt:
+            run_prompt.status = QueueJobStatus.FAILED
+            run_prompt.error_message = str(exc.detail)
+        db.add(RunLog(run_id=run.id, level="error", message=f"Job {job.id} failed: {exc.detail}"))
+
+    return job.status
+
+
+def process_next_queue_jobs_for_worker(db: Session, *, worker_id: UUID, limit: int) -> WorkerProcessResultRead:
+    worker = db.get(Worker, worker_id)
+    if not worker:
+        raise HTTPException(status_code=404, detail="Worker not found")
+
+    worker.last_heartbeat_at = datetime.now(timezone.utc)
+    worker.status = WorkerStatus.ONLINE
+    worker.current_job = None
+    db.flush()
+
+    query = (
+        select(QueueJob)
+        .where(QueueJob.status == QueueJobStatus.QUEUED)
+        .order_by(QueueJob.priority.desc(), QueueJob.queued_at.asc())
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+        .options(selectinload(QueueJob.connector))
+    )
+    if worker.connector_id:
+        query = query.where(QueueJob.connector_id == worker.connector_id)
+
+    jobs = db.scalars(query).all()
+    if not jobs:
+        worker.queue_depth = 0
+        db.commit()
+        return WorkerProcessResultRead(
+            worker_id=worker.id,
+            processed_job_ids=[],
+            completed_job_ids=[],
+            failed_job_ids=[],
+            completed_run_ids=[],
+            remaining_queue_depth=0,
+        )
+
+    processed_job_ids: list[UUID] = []
+    completed_job_ids: list[UUID] = []
+    failed_job_ids: list[UUID] = []
+    completed_run_ids: list[UUID] = []
+    touched_run_ids: set[UUID] = set()
+
+    for job in jobs:
+        status = _process_queue_job(db, job, worker=worker)
+        processed_job_ids.append(job.id)
+        touched_run_ids.add(job.run_id) if job.run_id else None
+        if status == QueueJobStatus.COMPLETED:
+            completed_job_ids.append(job.id)
+        elif status == QueueJobStatus.FAILED:
+            failed_job_ids.append(job.id)
+
+    db.flush()
+
+    for run_id in touched_run_ids:
+        run = db.scalar(
+            select(Run)
+            .where(Run.id == run_id)
+            .options(selectinload(Run.queue_jobs), selectinload(Run.scrape_results), selectinload(Run.run_prompts))
+        )
+        if run and not any(job.status in {QueueJobStatus.QUEUED, QueueJobStatus.RUNNING} for job in run.queue_jobs):
+            _complete_run(db, run)
+            completed_run_ids.append(run.id)
+
+    remaining_query = select(func.count()).select_from(QueueJob).where(QueueJob.status == QueueJobStatus.QUEUED)
+    if worker.connector_id:
+        remaining_query = remaining_query.where(QueueJob.connector_id == worker.connector_id)
+    worker.queue_depth = int(db.scalar(remaining_query) or 0)
+    worker.status = WorkerStatus.ONLINE
+    worker.current_job = None
+    worker.last_heartbeat_at = datetime.now(timezone.utc)
+    db.commit()
+
+    return WorkerProcessResultRead(
+        worker_id=worker.id,
+        processed_job_ids=processed_job_ids,
+        completed_job_ids=completed_job_ids,
+        failed_job_ids=failed_job_ids,
+        completed_run_ids=completed_run_ids,
+        remaining_queue_depth=worker.queue_depth,
+    )
