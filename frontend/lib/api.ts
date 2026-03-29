@@ -133,6 +133,7 @@ export type Connector = {
   id: string;
   workspace_id: string;
   name: string;
+  implementation_key: string;
   connector_type: string;
   health_status: string;
   provider_key?: string | null;
@@ -141,6 +142,17 @@ export type Connector = {
   success_rate?: number | null;
   average_latency_ms?: number | null;
   last_error?: string | null;
+};
+
+export type ScraperPlugin = {
+  key: string;
+  name: string;
+  description: string;
+  scraper_type: "llm_api" | "ui_scraper";
+  is_builtin: boolean;
+  provider_key?: string | null;
+  capabilities: string[];
+  config_schema: Record<string, unknown>;
 };
 
 export type Worker = {
@@ -354,8 +366,35 @@ export async function getRunDetail(runId: string) {
   return api<RunDetail>(`/runs/${runId}`);
 }
 
+export async function createManualRun(
+  workspaceId: string,
+  payload?: {
+    connector_id?: string | null;
+    prompt_ids?: string[] | null;
+    models?: string[] | null;
+    run_type?: string;
+    scope_description?: string | null;
+  }
+) {
+  return api<RunDetail>(`/workspaces/${workspaceId}/runs/manual`, {
+    method: "POST",
+    body: JSON.stringify(payload ?? {}),
+  });
+}
+
+export async function executeRun(runId: string) {
+  return api<RunDetail>(`/runs/${runId}/execute`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
 export async function getSettings(workspaceId: string) {
   return api<WorkspaceSetting[]>(`/workspaces/${workspaceId}/settings`);
+}
+
+export async function getScraperPlugins() {
+  return api<ScraperPlugin[]>("/scraper-plugins");
 }
 
 export async function upsertSetting(workspaceId: string, key: string, valueJson: Record<string, unknown>) {
@@ -395,6 +434,7 @@ export async function createConnector(
   workspaceId: string,
   payload: {
     name: string;
+    implementation_key: string;
     connector_type: string;
     provider_key?: string | null;
     is_enabled?: boolean;
@@ -411,6 +451,7 @@ export async function updateConnector(
   connectorId: string,
   payload: Partial<{
     name: string;
+    implementation_key: string;
     connector_type: string;
     provider_key: string | null;
     is_enabled: boolean;

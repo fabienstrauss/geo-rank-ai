@@ -1,6 +1,6 @@
 "use client";
 
-import { startTransition, useEffect, useState } from "react";
+import { startTransition, useCallback, useEffect, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -28,7 +28,21 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { ConnectorIncident, QueueJob, Run, RunDetail, RunList, Worker, getConnectorIncidents, getQueueJobs, getRunDetail, getRunsFiltered, getWorkers } from "@/lib/api";
+import {
+  ConnectorIncident,
+  QueueJob,
+  Run,
+  RunDetail,
+  RunList,
+  Worker,
+  createManualRun,
+  getConnectorIncidents,
+  getQueueJobs,
+  getRunDetail,
+  getRunsFiltered,
+  getWorkers,
+} from "@/lib/api";
+import { emitDataUpdated } from "@/lib/app-events";
 import { cn } from "@/lib/utils";
 
 const columnSeparatorClass = "border-r border-border/60";
@@ -62,8 +76,13 @@ function formatDuration(seconds?: number | null) {
   return `${minutes}m ${remainder}s`;
 }
 
+function normalizeRunErrorMessage(message: string) {
+  return message.replace(/^"+|"+$/g, "").trim();
+}
+
 export function RunsManager() {
   const { activeWorkspace } = useWorkspace();
+  const pollIntervalMs = 4000;
   const pageSize = 10;
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -78,37 +97,39 @@ export function RunsManager() {
   const [failures, setFailures] = useState<ConnectorIncident[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedRun, setSelectedRun] = useState<RunDetail | null>(null);
+  const [isStartingRun, setIsStartingRun] = useState(false);
+  const [runActionError, setRunActionError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    if (!activeWorkspace) return;
+    const requestOffset = workspaceId === activeWorkspace.id ? runPage.offset : 0;
+    const [runRows, workerRows, queueRows, incidentRows] = await Promise.all([
+      getRunsFiltered(activeWorkspace.id, {
+        statuses: selectedStatuses,
+        runTypes: selectedTypes,
+        search: query,
+        limit: pageSize,
+        offset: requestOffset,
+        sortBy,
+        sortOrder,
+      }),
+      getWorkers(),
+      getQueueJobs(activeWorkspace.id),
+      getConnectorIncidents(activeWorkspace.id),
+    ]);
+    startTransition(() => {
+      setWorkspaceId(activeWorkspace.id);
+      setRuns(runRows.items);
+      setRunPage(runRows);
+      setWorkers(workerRows);
+      setQueueJobs(queueRows);
+      setFailures(incidentRows);
+    });
+  }, [activeWorkspace, pageSize, query, runPage.offset, selectedStatuses, selectedTypes, sortBy, sortOrder, workspaceId]);
 
   useEffect(() => {
-    async function load() {
-      if (!activeWorkspace) return;
-      const requestOffset = workspaceId === activeWorkspace.id ? runPage.offset : 0;
-      const [runRows, workerRows, queueRows, incidentRows] = await Promise.all([
-        getRunsFiltered(activeWorkspace.id, {
-          statuses: selectedStatuses,
-          runTypes: selectedTypes,
-          search: query,
-          limit: pageSize,
-          offset: requestOffset,
-          sortBy,
-          sortOrder,
-        }),
-        getWorkers(),
-        getQueueJobs(activeWorkspace.id),
-        getConnectorIncidents(activeWorkspace.id),
-      ]);
-      startTransition(() => {
-        setWorkspaceId(activeWorkspace.id);
-        setRuns(runRows.items);
-        setRunPage(runRows);
-        setWorkers(workerRows);
-        setQueueJobs(queueRows);
-        setFailures(incidentRows);
-      });
-    }
-
     void load();
-  }, [activeWorkspace, pageSize, query, runPage.offset, selectedStatuses, selectedTypes, sortBy, sortOrder, workspaceId]);
+  }, [load]);
 
   useEffect(() => {
     if (!selectedRunId) return;
@@ -126,12 +147,67 @@ export function RunsManager() {
   const statusOptions = ["completed", "running", "queued", "failed"];
   const typeOptions = ["full_eval", "prompt_only", "reingest", "backfill"];
   const hasRunsData = runs.length > 0;
+  const shouldPoll =
+    isStartingRun ||
+    kpis.running > 0 ||
+    queueJobs.some((job) => job.status === "queued" || job.status === "running") ||
+    selectedRun?.status === "queued" ||
+    selectedRun?.status === "running";
+
+  useEffect(() => {
+    if (!shouldPoll) return;
+
+    const intervalId = window.setInterval(() => {
+      void load();
+      if (selectedRunId) {
+        void getRunDetail(selectedRunId).then(setSelectedRun);
+      }
+    }, pollIntervalMs);
+
+    return () => window.clearInterval(intervalId);
+  }, [load, pollIntervalMs, selectedRun?.status, selectedRunId, shouldPoll]);
+
+  const handleStartRun = async () => {
+    if (!activeWorkspace || isStartingRun) return;
+    setIsStartingRun(true);
+    setRunActionError(null);
+    try {
+      const createdRun = await createManualRun(activeWorkspace.id, {
+        run_type: "prompt_only",
+        scope_description: "Manual run from Runs page",
+      });
+      setSelectedRunId(createdRun.id);
+      setSelectedRun(createdRun);
+      await load();
+      emitDataUpdated();
+    } catch (error) {
+      setRunActionError(
+        error instanceof Error ? normalizeRunErrorMessage(error.message) : "Failed to start run"
+      );
+    } finally {
+      setIsStartingRun(false);
+    }
+  };
 
   return (
     <div className="space-y-6 pb-8">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Data & Runs</h1>
-        <p className="mt-1 text-muted-foreground">Monitor evaluation history, ingestion jobs, and operational issues.</p>
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">Data & Runs</h1>
+          <p className="mt-1 text-muted-foreground">Monitor evaluation history, ingestion jobs, and operational issues.</p>
+        </div>
+        <div className="flex flex-col items-start gap-2">
+          <Button onClick={() => void handleStartRun()} disabled={isStartingRun || !activeWorkspace}>
+            <PlayCircle className="h-4 w-4" />
+            {isStartingRun ? "Queueing..." : "Queue Active Prompts"}
+          </Button>
+          {shouldPoll ? <p className="text-xs text-muted-foreground">Auto-refreshing run state...</p> : null}
+          {runActionError ? (
+            <div className="max-w-lg rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+              {runActionError}
+            </div>
+          ) : null}
+        </div>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">

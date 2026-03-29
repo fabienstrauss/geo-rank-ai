@@ -8,6 +8,7 @@ import { useWorkspace } from "@/components/workspace-provider";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { DashboardData, getDashboard } from "@/lib/api";
+import { subscribeToDataUpdated } from "@/lib/app-events";
 
 const statIcons = [TrendingUp, Search, Share2, MessageCircle];
 
@@ -16,13 +17,27 @@ export default function Home() {
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
+
     async function load() {
       if (!activeWorkspace) return;
       const response = await getDashboard(activeWorkspace.id);
-      setDashboard(response);
+      if (!cancelled) {
+        setDashboard(response);
+      }
     }
 
     void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeWorkspace]);
+
+  useEffect(() => {
+    return subscribeToDataUpdated(() => {
+      if (!activeWorkspace) return;
+      void getDashboard(activeWorkspace.id).then(setDashboard);
+    });
   }, [activeWorkspace]);
 
   const hasDashboardData =

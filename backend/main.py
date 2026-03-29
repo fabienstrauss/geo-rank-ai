@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.dashboard import router as dashboard_router
+from api.execution import router as execution_router
 from api.prompts import router as prompts_router
 from api.root import router as root_router
 from api.runs import router as runs_router
@@ -25,6 +26,7 @@ app.include_router(root_router)
 app.include_router(workspace_router)
 app.include_router(prompts_router)
 app.include_router(runs_router)
+app.include_router(execution_router)
 app.include_router(settings_router)
 app.include_router(dashboard_router)
 app.include_router(system_router)

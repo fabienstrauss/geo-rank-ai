@@ -7,14 +7,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from models import Connector, ProviderCredential, WorkspaceSetting
+from plugins.registry import get_scraper_plugin
 from schemas import (
     ConnectorCreate,
     ConnectorRead,
     ConnectorUpdate,
-    LlmApiConnectorConfig,
     ProviderCredentialRead,
     ProviderCredentialUpsert,
-    UiScraperConnectorConfig,
     WorkspaceSettingUpsert,
 )
 from security import encrypt_secret, mask_secret
@@ -29,20 +28,25 @@ def get_workspace_setting(db: Session, workspace_id: UUID, key: str) -> Workspac
 
 def normalize_connector_payload(
     *,
+    implementation_key: str,
     connector_type,
     provider_key: str | None,
     config_json: dict | None,
 ):
-    if connector_type.value == "llm_api":
-        normalized = LlmApiConnectorConfig.model_validate(config_json or {}).model_dump()
-        resolved_provider = provider_key or normalized.get("provider")
-        if not resolved_provider:
-            raise HTTPException(status_code=422, detail="provider_key is required for llm_api connectors")
-        normalized["provider"] = resolved_provider
-        return resolved_provider, normalized
+    plugin = get_scraper_plugin(implementation_key)
+    if plugin.scraper_type != connector_type:
+        raise HTTPException(status_code=422, detail="implementation_key does not match connector_type")
 
-    normalized = UiScraperConnectorConfig.model_validate(config_json or {}).model_dump()
-    return provider_key, normalized
+    normalized = plugin.config_model.model_validate(config_json or {}).model_dump()
+    resolved_provider = provider_key or plugin.provider_key or normalized.get("provider")
+
+    if plugin.scraper_type.value == "llm_api" and not resolved_provider:
+        raise HTTPException(status_code=422, detail="provider_key is required for llm_api connectors")
+
+    if resolved_provider and "provider" in normalized:
+        normalized["provider"] = resolved_provider
+
+    return resolved_provider, normalized
 
 
 def upsert_workspace_setting_value(
@@ -221,6 +225,7 @@ def upsert_provider_credential_value(
 
 def create_connector_value(db: Session, *, workspace_id: UUID, payload: ConnectorCreate) -> Connector:
     provider_key, config_json = normalize_connector_payload(
+        implementation_key=payload.implementation_key,
         connector_type=payload.connector_type,
         provider_key=payload.provider_key,
         config_json=payload.config_json,
@@ -228,6 +233,7 @@ def create_connector_value(db: Session, *, workspace_id: UUID, payload: Connecto
     connector = Connector(
         workspace_id=workspace_id,
         name=payload.name,
+        implementation_key=payload.implementation_key,
         connector_type=payload.connector_type,
         provider_key=provider_key,
         is_enabled=payload.is_enabled,
@@ -245,10 +251,12 @@ def update_connector_value(db: Session, *, connector_id: UUID, payload: Connecto
         raise HTTPException(status_code=404, detail="Connector not found")
 
     updates = payload.model_dump(exclude_unset=True)
+    next_implementation_key = updates.get("implementation_key", connector.implementation_key)
     next_connector_type = updates.get("connector_type", connector.connector_type)
     next_provider_key = updates.get("provider_key", connector.provider_key)
     next_config_json = updates.get("config_json", connector.config_json)
     provider_key, config_json = normalize_connector_payload(
+        implementation_key=next_implementation_key,
         connector_type=next_connector_type,
         provider_key=next_provider_key,
         config_json=next_config_json,

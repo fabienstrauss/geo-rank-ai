@@ -403,6 +403,7 @@ class Connector(Base):
         default=ConnectorHealth.HEALTHY,
         server_default=ConnectorHealth.HEALTHY.value,
     )
+    implementation_key: Mapped[str] = mapped_column(String(150), nullable=False, index=True)
     provider_key: Mapped[str | None] = mapped_column(String(100), nullable=True)
     is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     config_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

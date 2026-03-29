@@ -10,12 +10,14 @@ from models import Connector, WorkspaceSetting
 from schemas import (
     ConnectorCreate,
     ConnectorRead,
+    ScraperPluginRead,
     ConnectorUpdate,
     ProviderCredentialRead,
     ProviderCredentialUpsert,
     WorkspaceSettingRead,
     WorkspaceSettingUpsert,
 )
+from plugins.registry import list_scraper_plugins
 from services.settings import (
     create_connector_value,
     delete_connector_value,
@@ -27,6 +29,23 @@ from services.settings import (
 
 
 router = APIRouter(tags=["settings"])
+
+
+@router.get("/scraper-plugins", response_model=list[ScraperPluginRead])
+def list_available_scraper_plugins():
+    return [
+        ScraperPluginRead(
+            key=plugin.key,
+            name=plugin.name,
+            description=plugin.description,
+            scraper_type=plugin.scraper_type,
+            is_builtin=plugin.is_builtin,
+            provider_key=plugin.provider_key,
+            capabilities=plugin.capabilities,
+            config_schema=plugin.config_schema(),
+        )
+        for plugin in list_scraper_plugins()
+    ]
 
 
 @router.get("/workspaces/{workspace_id}/settings", response_model=list[WorkspaceSettingRead])

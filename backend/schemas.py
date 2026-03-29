@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from models import (
     ConnectorHealth,
@@ -90,34 +90,31 @@ class UiScraperConnectorConfig(BaseModel):
 
 class ConnectorCreate(BaseModel):
     name: str
+    implementation_key: str
     connector_type: ConnectorType
     provider_key: str | None = None
     is_enabled: bool = True
     config_json: dict | None = None
 
-    @model_validator(mode="after")
-    def validate_config(self):
-        if self.connector_type == ConnectorType.LLM_API:
-            normalized = LlmApiConnectorConfig.model_validate(self.config_json or {}).model_dump()
-            provider = self.provider_key or normalized.get("provider")
-            if not provider:
-                raise ValueError("provider_key is required for llm_api connectors")
-            self.provider_key = provider
-            normalized["provider"] = provider
-            self.config_json = normalized
-            return self
-
-        normalized = UiScraperConnectorConfig.model_validate(self.config_json or {}).model_dump()
-        self.config_json = normalized
-        return self
-
 
 class ConnectorUpdate(BaseModel):
     name: str | None = None
+    implementation_key: str | None = None
     connector_type: ConnectorType | None = None
     provider_key: str | None = None
     is_enabled: bool | None = None
     config_json: dict | None = None
+
+
+class ScraperPluginRead(BaseModel):
+    key: str
+    name: str
+    description: str
+    scraper_type: ConnectorType
+    is_builtin: bool
+    provider_key: str | None
+    capabilities: list[str]
+    config_schema: dict
 
 
 class WorkspaceRead(BaseModel):
@@ -195,6 +192,14 @@ class RunSummaryRead(BaseModel):
     visibility_delta: float | None
     created_at: datetime
     updated_at: datetime
+
+
+class ManualRunCreate(BaseModel):
+    connector_id: UUID | None = None
+    prompt_ids: list[UUID] | None = None
+    models: list[str] | None = None
+    run_type: RunType = RunType.PROMPT_ONLY
+    scope_description: str | None = None
 
 
 class RunListSummaryRead(BaseModel):
@@ -288,6 +293,7 @@ class ConnectorRead(BaseModel):
     id: UUID
     workspace_id: UUID
     name: str
+    implementation_key: str
     connector_type: ConnectorType
     health_status: ConnectorHealth
     provider_key: str | None
@@ -335,6 +341,19 @@ class QueueJobRead(BaseModel):
     queued_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
+
+
+class WorkerProcessRequest(BaseModel):
+    limit: int = Field(default=1, ge=1, le=25)
+
+
+class WorkerProcessResultRead(BaseModel):
+    worker_id: UUID
+    processed_job_ids: list[UUID]
+    completed_job_ids: list[UUID]
+    failed_job_ids: list[UUID]
+    completed_run_ids: list[UUID]
+    remaining_queue_depth: int
 
 
 class DashboardStatRead(BaseModel):
