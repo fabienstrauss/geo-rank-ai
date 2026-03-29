@@ -27,7 +27,6 @@ import {
   createPrompt,
   deleteCategory,
   deletePrompt,
-  executeRun,
   getCategories,
   getPromptsFiltered,
   getSettings,
@@ -477,12 +476,11 @@ export function PromptsManager() {
     setIsRunning(true);
     setRunActionError(null);
     try {
-      const createdRun = await createManualRun(workspaceId, {
+      await createManualRun(workspaceId, {
         prompt_ids: promptIds ?? null,
         run_type: "prompt_only",
         scope_description: scopeDescription ?? "Manual run from Prompts page",
       });
-      await executeRun(createdRun.id);
       await load();
       emitDataUpdated();
     } catch (error) {
@@ -503,7 +501,7 @@ export function PromptsManager() {
           <div className="flex gap-2">
             <Button variant="outline" className="flex items-center gap-2" disabled={isRunning} onClick={() => void triggerRun(undefined, "Manual run from Prompts page")}>
               <PlayCircle className="h-4 w-4" />
-              {isRunning ? "Running..." : "Run Active Prompts"}
+              {isRunning ? "Queueing..." : "Queue Active Prompts"}
             </Button>
             <Button className="flex items-center gap-2" onClick={openCreateModal}>
               <Plus className="h-4 w-4" />
@@ -703,7 +701,7 @@ export function PromptsManager() {
                                   <DropdownMenuContent align="end">
                                     <DropdownMenuItem onClick={() => openEditModal(prompt)}>Edit prompt</DropdownMenuItem>
                                     <DropdownMenuItem onClick={() => void triggerRun([prompt.id], `Manual run for prompt ${prompt.id}`)}>
-                                      Run prompt
+                                      Queue prompt
                                     </DropdownMenuItem>
                                     <DropdownMenuItem
                                       onClick={async () => {

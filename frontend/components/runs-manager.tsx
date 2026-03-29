@@ -36,7 +36,6 @@ import {
   RunList,
   Worker,
   createManualRun,
-  executeRun,
   getConnectorIncidents,
   getQueueJobs,
   getRunDetail,
@@ -177,9 +176,8 @@ export function RunsManager() {
         run_type: "prompt_only",
         scope_description: "Manual run from Runs page",
       });
-      const executedRun = await executeRun(createdRun.id);
-      setSelectedRunId(executedRun.id);
-      setSelectedRun(executedRun);
+      setSelectedRunId(createdRun.id);
+      setSelectedRun(createdRun);
       await load();
       emitDataUpdated();
     } catch (error) {
@@ -201,7 +199,7 @@ export function RunsManager() {
         <div className="flex flex-col items-start gap-2">
           <Button onClick={() => void handleStartRun()} disabled={isStartingRun || !activeWorkspace}>
             <PlayCircle className="h-4 w-4" />
-            {isStartingRun ? "Running..." : "Run Active Prompts"}
+            {isStartingRun ? "Queueing..." : "Queue Active Prompts"}
           </Button>
           {shouldPoll ? <p className="text-xs text-muted-foreground">Auto-refreshing run state...</p> : null}
           {runActionError ? (
