@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, ArrowUpRight, Cpu, HardDrive, Layers3, ServerCog, ShieldCheck, WifiOff } from "lucide-react";
+import { startTransition, useCallback, useEffect, useMemo, useState } from "react";
+import { AlertTriangle, ArrowUpRight, Clock3, Cpu, HardDrive, Layers3, ServerCog, ShieldCheck, WifiOff } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { useWorkspace } from "@/components/workspace-provider";
@@ -29,32 +29,50 @@ function formatDuration(seconds: number) {
   return `${days}d ${hours}h`;
 }
 
+function formatQueueAge(value?: string | null) {
+  if (!value) return "n/a";
+  const diffMs = Date.now() - new Date(value).getTime();
+  const diffMinutes = Math.max(0, Math.floor(diffMs / 60000));
+  if (diffMinutes < 1) return "<1m";
+  if (diffMinutes < 60) return `${diffMinutes}m`;
+  const hours = Math.floor(diffMinutes / 60);
+  const minutes = diffMinutes % 60;
+  return `${hours}h ${minutes}m`;
+}
+
 export function SystemManager() {
   const { activeWorkspace } = useWorkspace();
+  const pollIntervalMs = 4000;
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("All");
+  const [workspaceId, setWorkspaceId] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState(0);
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [incidents, setIncidents] = useState<ConnectorIncident[]>([]);
   const [queueJobs, setQueueJobs] = useState<QueueJob[]>([]);
 
-  useEffect(() => {
-    async function load() {
-      if (!activeWorkspace) return;
-      const [workerRows, connectorRows, incidentRows, queueRows] = await Promise.all([
+  const load = useCallback(async () => {
+    if (!activeWorkspace) return;
+    const [workerRows, connectorRows, incidentRows, queueRows] = await Promise.all([
         getWorkers(),
         getConnectors(activeWorkspace.id),
         getConnectorIncidents(activeWorkspace.id),
         getQueueJobs(activeWorkspace.id),
       ]);
+    startTransition(() => {
+      setWorkspaceId(activeWorkspace.id);
+      setNowMs(Date.now());
       setWorkers(workerRows);
       setConnectors(connectorRows);
       setIncidents(incidentRows);
       setQueueJobs(queueRows);
-    }
-
-    void load();
+    });
   }, [activeWorkspace]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   const filteredWorkers = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -69,11 +87,42 @@ export function SystemManager() {
     });
   }, [query, statusFilter, workers]);
 
+  const queuedJobs = queueJobs.filter((job) => job.status === "queued");
+  const runningJobs = queueJobs.filter((job) => job.status === "running");
+  const failedJobs = queueJobs.filter((job) => job.status === "failed");
+  const completedJobs = queueJobs.filter((job) => job.status === "completed");
+  const enabledConnectors = connectors.filter((connector) => connector.is_enabled);
+  const degradedConnectors = connectors.filter((connector) => connector.health_status !== "healthy");
+  const busiestWorker = [...workers].sort((left, right) => right.queue_depth - left.queue_depth)[0] ?? null;
+  const oldestQueuedJob = [...queuedJobs].sort(
+    (left, right) => new Date(left.queued_at).getTime() - new Date(right.queued_at).getTime()
+  )[0] ?? null;
+  const backlogMinutes = oldestQueuedJob ? Math.max(0, Math.floor((nowMs - new Date(oldestQueuedJob.queued_at).getTime()) / 60000)) : 0;
+  const avgSuccessRate =
+    enabledConnectors.length > 0
+      ? enabledConnectors.reduce((sum, connector) => sum + (connector.success_rate ?? 0), 0) / enabledConnectors.length
+      : 0;
+  const shouldPoll =
+    workspaceId === activeWorkspace?.id &&
+    (runningJobs.length > 0 ||
+      queuedJobs.length > 0 ||
+      workers.some((worker) => worker.status === "busy" || worker.current_job));
+
+  useEffect(() => {
+    if (!shouldPoll) return;
+
+    const intervalId = window.setInterval(() => {
+      void load();
+    }, pollIntervalMs);
+
+    return () => window.clearInterval(intervalId);
+  }, [load, pollIntervalMs, shouldPoll]);
+
   const totals = {
     online: workers.filter((worker) => worker.status !== "offline").length,
     busy: workers.filter((worker) => worker.status === "busy").length,
     degraded: workers.filter((worker) => worker.status === "degraded").length,
-    queueDepth: workers.reduce((sum, worker) => sum + worker.queue_depth, 0),
+    queueDepth: queuedJobs.length + runningJobs.length,
     avgCpu: Math.round(workers.reduce((sum, worker) => sum + worker.cpu_percent, 0) / Math.max(workers.length, 1)),
     avgMemory: Math.round(workers.reduce((sum, worker) => sum + worker.memory_percent, 0) / Math.max(workers.length, 1)),
   };
@@ -84,6 +133,7 @@ export function SystemManager() {
       <div>
         <h1 className="text-3xl font-bold tracking-tight">System Infrastructure</h1>
         <p className="mt-1 text-muted-foreground">Monitor worker capacity, connector health, queue pressure, and runtime incidents.</p>
+        {shouldPoll ? <p className="mt-2 text-xs text-muted-foreground">Auto-refreshing worker and queue state...</p> : null}
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
@@ -231,7 +281,7 @@ export function SystemManager() {
 
           <Card>
             <CardHeader className="border-b pb-4">
-              <CardTitle className="text-base">Capacity Snapshot</CardTitle>
+              <CardTitle className="text-base">Queue Snapshot</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4 pt-6">
               <div className="rounded-xl border bg-muted/20 p-4">
@@ -239,21 +289,31 @@ export function SystemManager() {
                   <Layers3 className="h-4 w-4" />
                   Queue Pressure
                 </div>
-                <p className="mt-2 text-sm text-muted-foreground">{queueJobs.filter((job) => job.status === "queued").length} queued jobs across {connectors.length} connector types.</p>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  {queuedJobs.length} queued jobs and {runningJobs.length} active jobs across {enabledConnectors.length} enabled connectors.
+                </p>
+              </div>
+              <div className="rounded-xl border bg-muted/20 p-4">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <Clock3 className="h-4 w-4" />
+                  Oldest Backlog
+                </div>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  {oldestQueuedJob
+                    ? `Oldest queued job has been waiting ${formatQueueAge(oldestQueuedJob.queued_at)}.`
+                    : "No queued backlog right now."}
+                </p>
               </div>
               <div className="rounded-xl border bg-muted/20 p-4">
                 <div className="flex items-center gap-2 text-sm font-medium">
                   <ServerCog className="h-4 w-4" />
-                  Active Connectors
+                  Busiest Worker
                 </div>
-                <p className="mt-2 text-sm text-muted-foreground">{connectors.filter((connector) => connector.is_enabled).length} connectors enabled for scraping and evaluation.</p>
-              </div>
-              <div className="rounded-xl border bg-muted/20 p-4">
-                <div className="flex items-center gap-2 text-sm font-medium">
-                  <ShieldCheck className="h-4 w-4" />
-                  Recommended Next Step
-                </div>
-                <p className="mt-2 text-sm text-muted-foreground">Add connector-specific pause/disable controls in Settings once the control plane endpoints exist.</p>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  {busiestWorker
+                    ? `${busiestWorker.worker_name} is carrying ${busiestWorker.queue_depth} queued jobs${busiestWorker.current_job ? ` and is currently processing ${busiestWorker.current_job}` : ""}.`
+                    : "No workers have taken queue ownership yet."}
+                </p>
               </div>
             </CardContent>
           </Card>
@@ -297,21 +357,29 @@ export function SystemManager() {
                 <Cpu className="h-4 w-4" />
                 CPU Pressure
               </div>
-              <p className="mt-2 text-sm text-muted-foreground">Browser automation workers remain the limiting resource during peak reruns.</p>
+              <p className="mt-2 text-sm text-muted-foreground">
+                Fleet CPU is averaging {totals.avgCpu}% across {workers.length || 0} workers.
+              </p>
             </div>
             <div className="rounded-xl border bg-muted/20 p-4">
               <div className="flex items-center gap-2 text-sm font-medium">
                 <HardDrive className="h-4 w-4" />
-                Memory Pressure
+                Connector Reliability
               </div>
-              <p className="mt-2 text-sm text-muted-foreground">High-memory nodes should be recycled before queue spikes cascade into degraded workers.</p>
+              <p className="mt-2 text-sm text-muted-foreground">
+                {enabledConnectors.length > 0
+                  ? `${Math.round(avgSuccessRate)}% average success rate across enabled connectors, with ${degradedConnectors.length} showing degraded health.`
+                  : "No enabled connectors are configured for this workspace."}
+              </p>
             </div>
             <div className="rounded-xl border bg-muted/20 p-4">
               <div className="flex items-center gap-2 text-sm font-medium">
                 <ShieldCheck className="h-4 w-4" />
                 Queue State
               </div>
-              <p className="mt-2 text-sm text-muted-foreground">{queueJobs.filter((job) => job.status === "running").length} jobs are actively assigned to workers right now.</p>
+              <p className="mt-2 text-sm text-muted-foreground">
+                {runningJobs.length} jobs running, {completedJobs.length} completed, and {failedJobs.length} failed for this workspace. Current backlog age is {backlogMinutes} minutes.
+              </p>
             </div>
           </CardContent>
         </Card>
