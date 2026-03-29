@@ -11,6 +11,9 @@ from sqlalchemy.orm import Session, selectinload
 from models import (
     CompetitorSnapshot,
     Connector,
+    ConnectorHealth,
+    ConnectorIncident,
+    IncidentSeverity,
     Prompt,
     PromptMetricSnapshot,
     PromptStatus,
@@ -34,6 +37,11 @@ from schemas import ManualRunCreate, RunDetailRead, WorkerProcessResultRead
 from security import decrypt_secret
 from services.read_models import get_run_or_404
 from services.settings import get_workspace_setting
+
+
+FAILURE_DEGRADED_THRESHOLD = 3
+FAILURE_OFFLINE_THRESHOLD = 5
+WORKER_DEGRADED_THRESHOLD = 2
 
 
 def _resolve_prompt_scope(db: Session, workspace_id: UUID, payload: ManualRunCreate) -> list[Prompt]:
@@ -368,6 +376,132 @@ def _complete_run(db: Session, run: Run) -> RunDetailRead:
     return get_run_or_404(db, run.id)
 
 
+def _recent_connector_job_counts(db: Session, connector_id: UUID) -> tuple[int, int]:
+    recent_statuses = db.execute(
+        select(QueueJob.status)
+        .where(QueueJob.connector_id == connector_id, QueueJob.completed_at.is_not(None))
+        .order_by(QueueJob.completed_at.desc())
+        .limit(10)
+    ).scalars().all()
+    if not recent_statuses:
+        return 0, 0
+    completed = sum(1 for status in recent_statuses if status == QueueJobStatus.COMPLETED)
+    failed = sum(1 for status in recent_statuses if status == QueueJobStatus.FAILED)
+    return completed, failed
+
+
+def _recent_connector_failures(db: Session, connector_id: UUID) -> int:
+    recent_statuses = db.execute(
+        select(QueueJob.status)
+        .where(QueueJob.connector_id == connector_id, QueueJob.completed_at.is_not(None))
+        .order_by(QueueJob.completed_at.desc())
+        .limit(FAILURE_OFFLINE_THRESHOLD)
+    ).scalars().all()
+    return sum(1 for status in recent_statuses if status == QueueJobStatus.FAILED)
+
+
+def _recent_worker_failures(db: Session, worker_id: UUID) -> int:
+    recent_statuses = db.execute(
+        select(QueueJob.status)
+        .where(QueueJob.worker_id == worker_id, QueueJob.completed_at.is_not(None))
+        .order_by(QueueJob.completed_at.desc())
+        .limit(WORKER_DEGRADED_THRESHOLD)
+    ).scalars().all()
+    return sum(1 for status in recent_statuses if status == QueueJobStatus.FAILED)
+
+
+def _create_connector_incident(
+    db: Session,
+    *,
+    connector: Connector,
+    severity: IncidentSeverity,
+    title: str,
+    detail: str,
+) -> None:
+    existing_open_incident = db.scalar(
+        select(ConnectorIncident)
+        .where(
+            ConnectorIncident.connector_id == connector.id,
+            ConnectorIncident.title == title,
+            ConnectorIncident.resolved_at.is_(None),
+        )
+        .order_by(ConnectorIncident.occurred_at.desc())
+    )
+    if existing_open_incident:
+        existing_open_incident.detail = detail
+        return
+
+    db.add(
+        ConnectorIncident(
+            connector_id=connector.id,
+            severity=severity,
+            title=title,
+            detail=detail,
+        )
+    )
+
+
+def _resolve_open_connector_incidents(db: Session, connector: Connector) -> None:
+    open_incidents = db.scalars(
+        select(ConnectorIncident)
+        .where(ConnectorIncident.connector_id == connector.id, ConnectorIncident.resolved_at.is_(None))
+    ).all()
+    if not open_incidents:
+        return
+    resolved_at = datetime.now(timezone.utc)
+    for incident in open_incidents:
+        incident.resolved_at = resolved_at
+
+
+def _update_connector_health(db: Session, connector: Connector, *, error_message: str | None = None) -> None:
+    completed, failed = _recent_connector_job_counts(db, connector.id)
+    total = completed + failed
+    connector.success_rate = round((completed / total) * 100, 1) if total else None
+    connector.last_checked_at = datetime.now(timezone.utc)
+
+    recent_failures = _recent_connector_failures(db, connector.id)
+    if error_message:
+        connector.last_error = error_message
+    elif connector.health_status == ConnectorHealth.HEALTHY:
+        connector.last_error = None
+
+    if recent_failures >= FAILURE_OFFLINE_THRESHOLD:
+        connector.health_status = ConnectorHealth.OFFLINE
+        _create_connector_incident(
+            db,
+            connector=connector,
+            severity=IncidentSeverity.CRITICAL,
+            title="Connector repeatedly failing",
+            detail=f"Connector '{connector.name}' has failed {recent_failures} recent jobs. Latest error: {connector.last_error or 'unknown error'}",
+        )
+    elif recent_failures >= FAILURE_DEGRADED_THRESHOLD:
+        connector.health_status = ConnectorHealth.DEGRADED
+        _create_connector_incident(
+            db,
+            connector=connector,
+            severity=IncidentSeverity.WARNING,
+            title="Connector health degraded",
+            detail=f"Connector '{connector.name}' has failed {recent_failures} recent jobs. Latest error: {connector.last_error or 'unknown error'}",
+        )
+    else:
+        connector.health_status = ConnectorHealth.HEALTHY
+        if not error_message:
+            connector.last_error = None
+        _resolve_open_connector_incidents(db, connector)
+
+
+def _update_worker_health(db: Session, worker: Worker | None, *, failed: bool) -> None:
+    if worker is None:
+        return
+    if failed:
+        recent_failures = _recent_worker_failures(db, worker.id)
+        worker.status = WorkerStatus.DEGRADED if recent_failures >= WORKER_DEGRADED_THRESHOLD else WorkerStatus.ONLINE
+    else:
+        worker.status = WorkerStatus.ONLINE
+    worker.current_job = None
+    worker.last_heartbeat_at = datetime.now(timezone.utc)
+
+
 def execute_run_now(db: Session, *, run_id: UUID) -> RunDetailRead:
     run = db.scalar(
         select(Run)
@@ -411,6 +545,7 @@ def _process_queue_job(db: Session, job: QueueJob, *, worker: Worker | None = No
         job.status = QueueJobStatus.FAILED
         job.completed_at = datetime.now(timezone.utc)
         job.error_message = "Missing connector, prompt, or run for queued job"
+        _update_worker_health(db, worker, failed=True)
         return job.status
 
     _ensure_run_running(
@@ -500,6 +635,8 @@ def _process_queue_job(db: Session, job: QueueJob, *, worker: Worker | None = No
             run_prompt.mentions_count = result.mentions_count
             run_prompt.error_message = None
         db.add(RunLog(run_id=run.id, level="info", message=f"Completed prompt '{prompt.id}' for model '{scrape_result.llm_model}'"))
+        _update_connector_health(db, connector)
+        _update_worker_health(db, worker, failed=False)
     except HTTPException as exc:
         job.status = QueueJobStatus.FAILED
         job.completed_at = datetime.now(timezone.utc)
@@ -508,6 +645,18 @@ def _process_queue_job(db: Session, job: QueueJob, *, worker: Worker | None = No
             run_prompt.status = QueueJobStatus.FAILED
             run_prompt.error_message = str(exc.detail)
         db.add(RunLog(run_id=run.id, level="error", message=f"Job {job.id} failed: {exc.detail}"))
+        _update_connector_health(db, connector, error_message=str(exc.detail))
+        _update_worker_health(db, worker, failed=True)
+    except Exception as exc:
+        job.status = QueueJobStatus.FAILED
+        job.completed_at = datetime.now(timezone.utc)
+        job.error_message = str(exc)
+        if run_prompt:
+            run_prompt.status = QueueJobStatus.FAILED
+            run_prompt.error_message = str(exc)
+        db.add(RunLog(run_id=run.id, level="error", message=f"Job {job.id} failed unexpectedly: {exc}"))
+        _update_connector_health(db, connector, error_message=str(exc))
+        _update_worker_health(db, worker, failed=True)
 
     return job.status
 
